@@ -1,0 +1,6 @@
+daemon/secrets.json
+daemon/.venv/
+firmware/include/secrets.h
+firmware/.pio/
+__pycache__/
+.DS_Store

@@ -1,0 +1,40 @@
+{
+  "monthly_budget_usd": 500,
+  "update_interval_seconds": 60,
+  "claude_projects_dir": "~/.claude/projects",
+  "ble_device_name": "ClaudeObserver",
+  "ble_service_uuid": "7c3cd473-824b-4571-9a4d-c9e05cefcb88",
+  "ble_char_uuid": "7c3cd473-824b-4571-9a4d-c9e05cefcb89",
+  "pricing": {
+    "fable": {
+      "input": 15.0,
+      "output": 75.0,
+      "cache_write": 18.75,
+      "cache_read": 1.5
+    },
+    "opus": {
+      "input": 15.0,
+      "output": 75.0,
+      "cache_write": 18.75,
+      "cache_read": 1.5
+    },
+    "sonnet": {
+      "input": 3.0,
+      "output": 15.0,
+      "cache_write": 3.75,
+      "cache_read": 0.3
+    },
+    "haiku": {
+      "input": 1.0,
+      "output": 5.0,
+      "cache_write": 1.25,
+      "cache_read": 0.1
+    },
+    "default": {
+      "input": 3.0,
+      "output": 15.0,
+      "cache_write": 3.75,
+      "cache_read": 0.3
+    }
+  }
+}

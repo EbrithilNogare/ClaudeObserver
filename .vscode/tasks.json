@@ -1,0 +1,22 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ESP: build & upload",
+      "type": "shell",
+      "command": "pio run -t upload -t monitor",
+      "options": { "cwd": "${workspaceFolder}/firmware" },
+      "group": { "kind": "build" },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Daemon: build & run",
+      "type": "shell",
+      "command": "./install.sh && tail -f /tmp/claudeobserver.log",
+      "options": { "cwd": "${workspaceFolder}/daemon" },
+      "isBackground": true,
+      "group": { "kind": "build" },
+      "problemMatcher": []
+    }
+  ]
+}
