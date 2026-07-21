@@ -1,5 +1,9 @@
 # Claude Observer
 
+|<img width="320" height="170" alt="image" src="https://github.com/user-attachments/assets/7a6d5cff-c3c3-4593-81f0-9d40f1327edd" />|<img width="320" height="170" alt="image" src="https://github.com/user-attachments/assets/01a893ad-5c0c-472e-8742-bab8647d2738" />|
+|:--:|:--:|
+|Connected|Disconnected|
+
 A tiny desk companion that shows your Claude Code usage. A macOS daemon mines
 Claude Code's local transcripts and pushes stats over BLE to an ESP32-S3 with a
 1.9" LCD — a pair of Claude-orange eyes that blink when connected and sleep
