@@ -113,7 +113,7 @@ file that sleeps between updates (`update_interval_seconds`, 30 s by default).
 | VCC                | 3V3               | —    |
 | GND                | GND               | —    |
 | DIN (MOSI)         | D10               | 9    |
-| CLK (SCK)          | D8                | 7    |
+| CLK (SCK)          | D4                | 5    |
 | CS                 | D3                | 4    |
 | DC                 | D9                | 8    |
 | RST                | D5                | 6    |
@@ -128,7 +128,7 @@ file that sleeps between updates (`update_interval_seconds`, 30 s by default).
 ```mermaid
 flowchart LR
     subgraph XIAO [XIAO ESP32-S3]
-        P3V3[3V3]; PGND[GND]; D10[D10 / GPIO9]; D8[D8 / GPIO7]
+        P3V3[3V3]; PGND[GND]; D10[D10 / GPIO9]; D4[D4 / GPIO5]
         D3[D3 / GPIO4]; D9[D9 / GPIO8]; D5[D5 / GPIO6]; D2[D2 / GPIO3]
         BATP[BAT+ pad]; BATN[BAT- pad]; USB[USB-C]
     end
@@ -138,7 +138,7 @@ flowchart LR
     P3V3 --- VCC
     PGND --- GND2
     D10 --- DIN
-    D8 --- CLK
+    D4 --- CLK
     D3 --- CS
     D9 --- DC
     D5 --- RST

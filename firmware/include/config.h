@@ -2,7 +2,7 @@
 
 // ---------------- pins (Seeed XIAO ESP32-S3, GPIO numbers) ----------------
 // LCD VCC goes to the 3V3 pin (a GPIO cannot source the module's current).
-#define PIN_LCD_SCK   7   // D8
+#define PIN_LCD_SCK   5   // D4
 #define PIN_LCD_MOSI  9   // D10
 #define PIN_LCD_CS    4   // D3
 #define PIN_LCD_DC    8   // D9
