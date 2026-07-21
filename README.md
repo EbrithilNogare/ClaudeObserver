@@ -19,7 +19,7 @@ flowchart LR
         J[("~/.claude/projects/**/*.jsonl<br/>usage transcripts")] --> D
         D["claude_observer.py<br/>LaunchAgent daemon"]
     end
-    D -- "BLE GATT write<br/>compact JSON every 60 s" --> E
+    D -- "BLE GATT write<br/>compact JSON every ~30 s" --> E
     subgraph device [ESP32-S3 device]
         E["NimBLE server"] --> U["LCD UI<br/>eyes + stats"]
     end
@@ -27,29 +27,46 @@ flowchart LR
 
 Data sources, in order of preference:
 
-1. **Official spend & limit** — `https://api.anthropic.com/api/oauth/usage`,
-   the (undocumented) endpoint claude.ai itself uses, authenticated with the
-   OAuth token Claude Code keeps in `~/.claude/.credentials.json`. Gives the
-   exact monthly `used / limit` in dollars. Zero setup for Claude Code users;
-   if the token is expired just run any `claude` command to refresh it.
+1. **Official spend & limit** — the exact monthly `used / limit` in dollars from
+   the same (undocumented) billing endpoint claude.ai uses. The daemon
+   (`fetch_official_budget`) tries two auth methods in order:
+   - **OAuth token** from `~/.claude/.credentials.json`
+     (`https://api.anthropic.com/api/oauth/usage`). Zero setup for most Claude
+     Code users; if the token is merely expired, run any `claude` command to
+     refresh it.
+   - **Browser session key** as a fallback
+     (`https://claude.ai/api/organizations/<org_id>/usage`). On enterprise/SSO
+     logins the OAuth token is often stale and never refreshes, so set
+     `session_key` + `org_id` in `secrets.json` — or let the daemon read them
+     from `~/.claude/claude_usage_config.json`. This path needs `curl_cffi`
+     (in `requirements.txt`) to get past Cloudflare.
+
+   The result is cached for `official_budget_ttl_seconds` (config, default 300 s)
+   so it isn't refetched every cycle.
 2. **Local transcripts** — every assistant turn in
    `~/.claude/projects/**/*.jsonl` carries the model id and exact token usage.
    Used for everything the endpoint doesn't provide (per-day spend, model
    split, tokens, sessions, last month) with costs from the pricing table in
    `daemon/config.json`, and as the monthly fallback when the endpoint is
-   unreachable (then `monthly_budget_usd` from config is the limit).
+   unreachable (then `monthly_budget_usd` from config is the limit). The daemon
+   reads these **incrementally** — a `UsageCollector` keeps per-day running
+   totals in memory and each cycle parses only the newly-appended bytes of files
+   whose size/mtime changed, rather than re-reading every transcript.
 
 ### Data shown on the display
 
-| Stat                         | Source                                                                             |
-| ---------------------------- | ---------------------------------------------------------------------------------- |
-| Monthly budget spent / total | official OAuth usage endpoint (fallback: summed JSONL cost / `monthly_budget_usd`) |
-| Daily budget spent / total   | today's cost / (monthly budget ÷ days in month)                                    |
-| Top 3 models (today)         | cost share per model family                                                        |
-| Last month spent             | summed cost of previous calendar month                                             |
-| Sessions today               | distinct session ids with activity today                                           |
-| Tokens today + month         | all tokens incl. cache read/write                                                  |
-| ESP temp + BLE signal        | device internal temperature and connection RSSI, top-right corner                  |
+| Stat                         | Source                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------- |
+| Monthly budget spent / total | official usage endpoint (fallback: summed JSONL cost / `monthly_budget_usd`)    |
+| Daily budget spent / total   | today's cost / (monthly budget ÷ days in month)                                 |
+| Top 3 models today           | today's cost share per model family                                             |
+| Last month spent             | summed cost of previous calendar month                                          |
+| Tokens today + month         | all tokens incl. cache read/write                                               |
+| ESP temp + BLE signal        | device internal temperature and connection RSSI, top-right corner               |
+| `data stale...`              | shown top-left when no BLE update has arrived for 5 min                          |
+
+> The BLE payload also carries `ses` (sessions today) and `mm` (month model
+> split), but the current firmware doesn't render them — see [BLE protocol](#ble-protocol).
 
 ## 1. macOS daemon
 
@@ -58,7 +75,9 @@ cd daemon
 ./install.sh        # venv + deps + LaunchAgent, starts at login and now
 ```
 
-- Configure budget & pricing in `daemon/config.json`; personal overrides go in
+- Configure budget, pricing, and `update_interval_seconds` in
+  `daemon/config.json`; personal overrides (fallback `monthly_budget_usd`, and
+  the `session_key` / `org_id` for the official-budget fallback) go in
   `daemon/secrets.json` (gitignored, created from `secrets.example.json`).
 - Debug without BLE: `python3 claude_observer.py --once` prints the payload.
 - Logs: `/tmp/claudeobserver.log`. Uninstall: `./uninstall.sh`.
@@ -68,7 +87,7 @@ cd daemon
 Why a LaunchAgent: it is the native lightweight way to run a per-user
 background process — auto-starts at login (`RunAtLoad`), auto-restarts on crash
 (`KeepAlive`), no Dock icon, no Electron. The daemon itself is a single Python
-file that sleeps between 60 s updates.
+file that sleeps between updates (`update_interval_seconds`, 30 s by default).
 
 ## 2. ESP32 device
 
@@ -161,20 +180,24 @@ pio device monitor       # optional: watch [ble]/[data] logs
 
 ### Display behaviour
 
-- **Sleep mode** (no BLE connection): orange background, closed black eyes
-  gently breathing, floating `z Z z`.
-- **Awake** (Mac connected): eyes stay center and blink at random intervals;
-  around them: monthly + daily budget with colored progress bars (green → amber
-  ≥90 % → red over), tokens today/month, sessions today, last month spend, and
-  top-3 models (today/month alternating). The ESP temperature and BLE signal
-  strength show in the top-right corner. Shows `data stale...` if no update
-  arrives for 5 min.
+- **Sleep mode** (no BLE connection, or connected but no data yet): orange
+  background, closed black eyes gently breathing, floating `z Z z`, and a
+  bottom-left caption (`waiting for mac...`, or `sleeping (BLE lost)` once data
+  has been seen).
+- **Awake** (Mac connected _and_ data received): eyes blink at random intervals;
+  around them — left column: tokens today, tokens month, last-month spend;
+  right column: today's top-3 model split (static, right-aligned); bottom:
+  monthly (left) and daily (right) budget with colored progress bars
+  (green → amber ≥90 % → red at/over 100 %). The ESP temperature and BLE signal
+  strength show in the top-right corner. `data stale...` appears top-left if no
+  update arrives for 5 min.
 
 ## BLE protocol
 
 ESP advertises service `7c3cd473-824b-4571-9a4d-c9e05cefcb88` as
 `ClaudeObserver`. The daemon connects as central and writes a newline-terminated
-compact JSON to characteristic `...5c1a0de00002` in ≤180-byte chunks:
+compact JSON to characteristic `7c3cd473-824b-4571-9a4d-c9e05cefcb89` in
+≤180-byte chunks:
 
 ```json
 {
@@ -193,5 +216,20 @@ compact JSON to characteristic `...5c1a0de00002` in ≤180-byte chunks:
 }
 ```
 
+| Field | Meaning                                            | Rendered? |
+| ----- | -------------------------------------------------- | --------- |
+| `mb`  | month budget `[spent, limit]`                      | yes       |
+| `db`  | day budget `[spent, limit]`                        | yes       |
+| `tm`  | today's top-3 model split `[[family, pct], …]`     | yes       |
+| `mm`  | month's top-3 model split                          | no        |
+| `lm`  | last calendar month spend                          | yes       |
+| `ses` | distinct sessions active today                     | no        |
+| `tt`  | tokens today (incl. cache read/write)              | yes       |
+| `mt`  | tokens this month                                  | yes       |
+
+`mm` and `ses` are transmitted but the current firmware parses without drawing
+them (see `applyPayload` / `drawStats` in `firmware/src/main.cpp` and
+`ui.h`) — room for a future UI without a protocol change.
+
 UUIDs and device name live in `daemon/config.json` and
-`firmware/include/secrets.h` — keep them in sync.
+`firmware/include/secrets.h` (from `secrets.example.h`) — keep them in sync.

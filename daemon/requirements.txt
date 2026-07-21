@@ -1,1 +1,2 @@
 bleak>=0.22
+curl_cffi>=0.7
