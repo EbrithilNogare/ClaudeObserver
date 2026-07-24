@@ -22,7 +22,7 @@ struct AppState {
   uint32_t lastUpdateMs = 0;
   volatile uint16_t connHandle = 0xFFFF;  // BLE_HS_CONN_HANDLE_NONE
   int8_t rssi = 0;                        // BLE signal strength (dBm), <0
-  float espTempC = 0;                     // ESP32-S3 internal temperature
+  float espTempC = 0;                     // ESP32 internal temperature
   Stats stats;
 };
 

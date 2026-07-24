@@ -2,7 +2,7 @@
 #include "lgfx_conf.h"
 #include "state.h"
 
-// Full-frame sprite rendering (kept in PSRAM) — flicker-free animations.
+// Full-frame sprite rendering (internal SRAM) — flicker-free animations.
 class UI {
   LGFX _lcd;
   LGFX_Sprite _frame{&_lcd};
@@ -17,11 +17,10 @@ public:
     _lcd.init();
     _lcd.setRotation(LCD_ROTATION);
     _lcd.fillScreen(COL_BG);  // visible immediately, even before first frame
-    _frame.setPsram(true);
+    // No PSRAM on the C6 — a 320x170 16-bit sprite is ~106 KB and fits in
+    // the 512 KB SRAM; halve the color depth if allocation ever fails.
     if (!_frame.createSprite(_lcd.width(), _lcd.height())) {
-      // No PSRAM available — fall back to an 8-bit sprite in internal RAM.
-      Serial.println("[ui] PSRAM sprite failed, falling back to 8-bit");
-      _frame.setPsram(false);
+      Serial.println("[ui] 16-bit sprite failed, falling back to 8-bit");
       _frame.setColorDepth(8);
       _frame.createSprite(_lcd.width(), _lcd.height());
     }

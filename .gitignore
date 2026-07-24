@@ -1,4 +1,5 @@
 daemon/secrets.json
+daemon/day_baseline.json
 daemon/.venv/
 firmware/include/secrets.h
 firmware/.pio/

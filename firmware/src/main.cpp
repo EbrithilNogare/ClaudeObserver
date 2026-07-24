@@ -114,9 +114,19 @@ static void updateSensors(uint32_t now) {
 
 // ---------------------------------------------------------------- arduino
 
+// The C6's RF switch must be enabled and pointed at an antenna before the
+// radio starts, or BLE range is terrible with either antenna.
+static void antennaBegin() {
+  pinMode(PIN_RF_SWITCH_EN, OUTPUT);
+  digitalWrite(PIN_RF_SWITCH_EN, LOW);  // LOW = RF switch powered
+  pinMode(PIN_ANTENNA_SELECT, OUTPUT);
+  digitalWrite(PIN_ANTENNA_SELECT, USE_EXTERNAL_ANTENNA ? HIGH : LOW);
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.println("[boot] ClaudeObserver starting");
+  antennaBegin();
   ui.begin();
   bleBegin();
 }

@@ -1,33 +1,40 @@
 #pragma once
 
-// ---------------- pins (Seeed XIAO ESP32-S3, GPIO numbers) ----------------
+// ---------------- pins (Seeed XIAO ESP32-C6, GPIO numbers) ----------------
+// Same D-pin positions as the old S3 wiring — only the GPIO numbers differ.
 // LCD VCC goes to the 3V3 pin (a GPIO cannot source the module's current).
-#define PIN_LCD_SCK   5   // D4
-#define PIN_LCD_MOSI  9   // D10
-#define PIN_LCD_CS    4   // D3
-#define PIN_LCD_DC    8   // D9
-#define PIN_LCD_RST   6   // D5
-#define PIN_LCD_BL    3   // D2
+#define PIN_LCD_SCK   22  // D4
+#define PIN_LCD_MOSI  18  // D10
+#define PIN_LCD_CS    21  // D3
+#define PIN_LCD_DC    20  // D9
+#define PIN_LCD_RST   23  // D5
+#define PIN_LCD_BL    2   // D2
 
 // ---------------- display ----------------
 #define LCD_WIDTH   170
 #define LCD_HEIGHT  320
 #define LCD_OFFSET_X 35   // ST7789V2 170x320 panels are offset in 240x320 RAM
-#define LCD_ROTATION 1    // landscape 320x170
-#define LCD_BRIGHTNESS 255  // backlight PWM duty (0-255); 100%
+#define LCD_ROTATION 3    // landscape 320x170, flipped 180°
+#define LCD_BRIGHTNESS 222  // backlight PWM duty (0-255); 100%
 
 // ---------------- behaviour ----------------
 #define DATA_STALE_MS      (5 * 60 * 1000)  // no BLE update for 5 min -> stale marker
 #define FRAME_MS           33               // ~30 fps animations
 
-// External antenna: plug a U.FL antenna into the board's LNA_IN connector —
-// the XIAO ESP32-S3 uses it automatically, no code/GPIO switch needed.
-// BLE has no "auto" TX power, so we run low (the external antenna gives the
+// Antenna: unlike the S3, the XIAO ESP32-C6 has an RF switch that must be
+// driven — GPIO14 LOW enables the switch, GPIO3 selects the antenna
+// (LOW = built-in ceramic, HIGH = external U.FL). Set USE_EXTERNAL_ANTENNA
+// to 1 if you plugged an antenna into the U.FL connector.
+#define PIN_RF_SWITCH_EN     14
+#define PIN_ANTENNA_SELECT   3
+#define USE_EXTERNAL_ANTENNA 1
+
+// BLE has no "auto" TX power, so we run low (an external antenna gives the
 // range back, and it saves battery). Raise toward +9 / +18 for more reach.
 #define BLE_TX_POWER_DBM   -9
 
 // Claude-ish palette (RGB565)
-#define COL_BG        0xDB88   // warm Claude orange (#D97757-ish)
+#define COL_BG        0xFB46   // Prusa orange (#FA6831-ish) — matches the printed case
 #define COL_EYE       0x2104   // near black
 #define COL_PANEL     0x39C7   // dark panel behind text
 #define COL_TEXT      0xFFFF

@@ -198,6 +198,9 @@ class UsageCollector:
 
         self._official = None       # cached (used, limit)
         self._official_at = 0.0     # monotonic-ish wall time of last fetch
+        # start-of-day value of the official monthly counter (gitignored,
+        # survives restarts) — lets us derive today's real spend incl. web
+        self._baseline_path = Path(__file__).parent / "day_baseline.json"
 
     # ---- ingest ----
 
@@ -286,6 +289,34 @@ class UsageCollector:
             self._official_at = now
         return self._official
 
+    def _official_day_spent(self, official_used: float, local_today: float) -> float:
+        """Today's spend from deltas of the official monthly counter.
+
+        The endpoint only exposes a monthly running total — but that total
+        includes claude.ai web usage the local JSONL estimate can't see, so we
+        persist its value at the start of each day and report used-minus-
+        baseline. The very first run seeds the baseline with the local
+        estimate (earlier web spend that day is unrecoverable).
+        """
+        today = date.today().isoformat()
+        try:
+            base = json.loads(self._baseline_path.read_text())
+        except (OSError, ValueError):
+            base = None
+        if base is None:  # first ever run — seed from the local estimate
+            base = {"day": today, "used": max(0.0, official_used - local_today)}
+        elif base["day"] != today:  # new day starts at zero
+            base = {"day": today, "used": official_used}
+        elif official_used < base["used"]:  # monthly counter reset mid-day
+            base = {"day": today, "used": 0.0}
+        else:
+            return official_used - base["used"]
+        try:
+            self._baseline_path.write_text(json.dumps(base))
+        except OSError as exc:
+            log.warning("cannot persist day baseline: %s", exc)
+        return official_used - base["used"]
+
     def snapshot(self) -> dict:
         today = date.today()
         month_start = today.replace(day=1)
@@ -301,15 +332,17 @@ class UsageCollector:
 
         # Official spend/limit beats the JSONL estimate + configured fallback budget.
         official = self._official_budget()
+        day_spent = self._day_cost.get(today, 0.0)
         if official:
             month_cost, monthly_budget = official
+            day_spent = self._official_day_spent(month_cost, day_spent)
         else:
             monthly_budget = float(self.cfg["monthly_budget_usd"])
         days_in_month = calendar.monthrange(today.year, today.month)[1]
 
         return {
             "mb": [round(month_cost, 2), monthly_budget],
-            "db": [round(self._day_cost.get(today, 0.0), 2), round(monthly_budget / days_in_month, 2)],
+            "db": [round(day_spent, 2), round(monthly_budget / days_in_month, 2)],
             "tm": _top3(self._day_models.get(today, {})),
             "mm": _top3(month_models),
             "lm": round(last_month_cost, 2),

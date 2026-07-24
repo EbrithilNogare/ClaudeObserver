@@ -5,14 +5,14 @@
 |Connected|Disconnected|
 
 A tiny desk companion that shows your Claude Code usage. A macOS daemon mines
-Claude Code's local transcripts and pushes stats over BLE to an ESP32-S3 with a
+Claude Code's local transcripts and pushes stats over BLE to an ESP32-C6 with a
 1.9" LCD — a pair of Claude-orange eyes that blink when connected and sleep
 when your Mac is away.
 
 ```
 ClaudeObserver/
 ├── daemon/      macOS LaunchAgent (Python) — collects stats, BLE central
-└── firmware/    Seeed XIAO ESP32-S3 (PlatformIO) — BLE peripheral + display
+└── firmware/    Seeed XIAO ESP32-C6 (PlatformIO) — BLE peripheral + display
 ```
 
 ## How it works
@@ -24,7 +24,7 @@ flowchart LR
         D["claude_observer.py<br/>LaunchAgent daemon"]
     end
     D -- "BLE GATT write<br/>compact JSON every ~30 s" --> E
-    subgraph device [ESP32-S3 device]
+    subgraph device [ESP32-C6 device]
         E["NimBLE server"] --> U["LCD UI<br/>eyes + stats"]
     end
 ```
@@ -97,27 +97,30 @@ file that sleeps between updates (`update_interval_seconds`, 30 s by default).
 
 ### Hardware
 
-- **Seeed Studio XIAO ESP32-S3** (8 MB PSRAM used for flicker-free rendering)
+- **Seeed Studio XIAO ESP32-C6** (no PSRAM — the full frame sprite lives in the
+  512 KB internal SRAM instead)
 - **Waveshare 1.9" LCD Module** (SKU 23822) — ST7789V2, 170×320, SPI
 - **900 mAh 3.7 V LiPo** on the XIAO battery pads (built-in charger, charges from USB-C)
 - **Slide switch** as a hard power switch in the battery line
-- **External U.FL antenna** (optional) — plug into the `LNA_IN` connector on the
-  front bottom-left of the XIAO. On the ESP32-S3 the radio uses it automatically,
-  no GPIO switch or code needed. BLE TX power is set low in firmware
-  (`BLE_TX_POWER_DBM` in `config.h`); the external antenna restores the range.
+- **External U.FL antenna** (optional) — plug into the U.FL connector. Unlike
+  the S3, the C6 has an RF switch the firmware must drive: GPIO14 enables it
+  and GPIO3 selects built-in ceramic vs external antenna. Set
+  `USE_EXTERNAL_ANTENNA` to `1` in `config.h` to use the external one. BLE TX
+  power is set low in firmware (`BLE_TX_POWER_DBM` in `config.h`); the external
+  antenna restores the range.
 
 ### Wiring
 
-| Waveshare 1.9" LCD | XIAO ESP32-S3 pin | GPIO |
+| Waveshare 1.9" LCD | XIAO ESP32-C6 pin | GPIO |
 | ------------------ | ----------------- | ---- |
 | VCC                | 3V3               | —    |
 | GND                | GND               | —    |
-| DIN (MOSI)         | D10               | 9    |
-| CLK (SCK)          | D4                | 5    |
-| CS                 | D3                | 4    |
-| DC                 | D9                | 8    |
-| RST                | D5                | 6    |
-| BL                 | D2                | 3    |
+| DIN (MOSI)         | D10               | 18   |
+| CLK (SCK)          | D4                | 22   |
+| CS                 | D3                | 21   |
+| DC                 | D9                | 20   |
+| RST                | D5                | 23   |
+| BL                 | D2                | 2    |
 
 | Other        | Connection                               |
 | ------------ | ---------------------------------------- |
@@ -127,9 +130,9 @@ file that sleeps between updates (`update_interval_seconds`, 30 s by default).
 
 ```mermaid
 flowchart LR
-    subgraph XIAO [XIAO ESP32-S3]
-        P3V3[3V3]; PGND[GND]; D10[D10 / GPIO9]; D4[D4 / GPIO5]
-        D3[D3 / GPIO4]; D9[D9 / GPIO8]; D5[D5 / GPIO6]; D2[D2 / GPIO3]
+    subgraph XIAO [XIAO ESP32-C6]
+        P3V3[3V3]; PGND[GND]; D10[D10 / GPIO18]; D4[D4 / GPIO22]
+        D3[D3 / GPIO21]; D9[D9 / GPIO20]; D5[D5 / GPIO23]; D2[D2 / GPIO2]
         BATP[BAT+ pad]; BATN[BAT- pad]; USB[USB-C]
     end
     subgraph LCD [Waveshare 1.9in LCD]
@@ -162,13 +165,15 @@ true hard power switch:
 
 Wiring gotchas learned on real hardware:
 
-- **LCD VCC must be on 3V3, not a GPIO** — an ESP32-S3 pin sources ~40 mA max
+- **LCD VCC must be on 3V3, not a GPIO** — an ESP32 pin sources ~40 mA max
   and the module draws more; on a GPIO the rail collapses (faint backlight,
-  black screen). For a firmware-switchable rail use a high-side P-MOSFET
-  (gate → free GPIO via 1 kΩ + 100 kΩ gate-to-source pull-up, source → 3V3,
-  drain → LCD VCC).
-- **DC is on D9** (GPIO8). To move it, change `PIN_LCD_DC` in
+  black screen, brightness flicker). For a firmware-switchable rail use a
+  high-side P-MOSFET (gate → free GPIO via 1 kΩ + 100 kΩ gate-to-source
+  pull-up, source → 3V3, drain → LCD VCC).
+- **DC is on D9** (GPIO20). To move it, change `PIN_LCD_DC` in
   `firmware/include/config.h` and rewire to match.
+- **GPIO3 and GPIO14 are reserved for the C6's antenna RF switch** — don't
+  wire anything to them (they are not on the XIAO header anyway).
 - If your module is a generic ST7789 (not the Waveshare), wire by the labels
   on its silkscreen (`SCL`=CLK, `SDA`=DIN, `RES`=RST, `BLK`=BL), not by
   connector position.
