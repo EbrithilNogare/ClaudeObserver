@@ -339,10 +339,16 @@ class UsageCollector:
         else:
             monthly_budget = float(self.cfg["monthly_budget_usd"])
         days_in_month = calendar.monthrange(today.year, today.month)[1]
+        # Remaining budget spread over the weekdays left this month (incl. today).
+        weekdays_left = sum(
+            1 for day in range(today.day, days_in_month + 1)
+            if date(today.year, today.month, day).weekday() < 5
+        )
+        day_budget = (monthly_budget - month_cost + day_spent) / max(weekdays_left, 1)
 
         return {
             "mb": [round(month_cost, 2), monthly_budget],
-            "db": [round(day_spent, 2), round(monthly_budget / days_in_month, 2)],
+            "db": [round(day_spent, 2), round(day_budget, 2)],
             "tm": _top3(self._day_models.get(today, {})),
             "mm": _top3(month_models),
             "lm": round(last_month_cost, 2),
