@@ -60,7 +60,7 @@ private:
   void drawEyes(uint32_t now, bool sleeping) {
     const int cx = _frame.width() / 2;
     const int cy = sleeping ? _frame.height() / 2 : 88;
-    const int gap = 22, eyeW = 16, eyeH = 40;
+    const int gap = 29, eyeW = 21, eyeH = 52;
 
     float openness = 1.0f;
     if (sleeping) {
@@ -89,7 +89,7 @@ private:
     for (int side = -1; side <= 1; side += 2) {
       int x = cx + side * gap - eyeW / 2;
       int y = cy - h / 2 + bob;
-      _frame.fillSmoothRoundRect(x, y, eyeW, h, min(7, h / 2), COL_EYE);
+      _frame.fillSmoothRoundRect(x, y, eyeW, h, min(9, h / 2), COL_EYE);
     }
   }
 
@@ -112,7 +112,7 @@ private:
     _frame.setTextSize(1);
     _frame.setTextColor(COL_EYE, COL_BG);
     _frame.setCursor(6, _frame.height() - 12);
-    _frame.print(app.hasData ? "sleeping (BLE lost)" : "waiting for mac...");
+    _frame.print(app.hasData ? "sleeping (BLE lost)" : "waiting for BLE...");
   }
 
   // ---------------- stats ----------------
