@@ -34,7 +34,7 @@
 #define BLE_TX_POWER_DBM   -9
 
 // Claude-ish palette (RGB565)
-#define COL_BG        0xFB46   // Prusa orange (#FA6831-ish) — matches the printed case
+#define COL_BG        0xFC89   // Prusa orange (#FF904F) — matches the printed case
 #define COL_EYE       0x2104   // near black
 #define COL_PANEL     0x39C7   // dark panel behind text
 #define COL_TEXT      0xFFFF
