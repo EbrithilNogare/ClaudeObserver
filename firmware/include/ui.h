@@ -30,8 +30,13 @@ public:
   void render(uint32_t now) {
     _frame.fillSprite(COL_BG);
     if (app.connected && app.hasData) {
-      drawStats(now);
-      drawEyes(now, /*sleeping=*/false);
+      if (app.authError) {
+        drawDeadEyes(now);
+        drawAuthErrorExtras();
+      } else {
+        drawStats(now);
+        drawEyes(now, /*sleeping=*/false);
+      }
     } else {
       drawEyes(now, /*sleeping=*/true);
       drawSleepExtras(now);
@@ -93,6 +98,44 @@ private:
     }
   }
 
+  // XX eyes — shown when the daemon has credentials but they were rejected.
+  // Draws two "×" marks where the normal eyes sit.
+  void drawDeadEyes(uint32_t now) {
+    const int cx = _frame.width() / 2;
+    const int cy = _frame.height() / 2;
+    const int gap = 29, eyeW = 21, eyeH = 52;
+    // subtle pulse so the display doesn't look frozen
+    float pulse = 0.85f + 0.15f * sinf(now / 600.0f);
+    uint16_t col = COL_EYE;
+
+    for (int side = -1; side <= 1; side += 2) {
+      int ex = cx + side * gap;  // eye centre X
+      int ey = cy;               // eye centre Y
+      int hw = (int)(eyeW * 0.45f * pulse);  // half-width of the X arms
+      int hh = (int)(eyeH * 0.45f * pulse);  // half-height
+      int th = 3;                             // arm thickness (half)
+      // diagonal \ — top-left to bottom-right
+      for (int t = -th; t <= th; t++) {
+        _frame.drawLine(ex - hw + t, ey - hh, ex + hw + t, ey + hh, col);
+        _frame.drawLine(ex - hw, ey - hh + t, ex + hw, ey + hh + t, col);
+      }
+      // diagonal / — top-right to bottom-left
+      for (int t = -th; t <= th; t++) {
+        _frame.drawLine(ex + hw + t, ey - hh, ex - hw + t, ey + hh, col);
+        _frame.drawLine(ex + hw, ey - hh + t, ex - hw, ey + hh + t, col);
+      }
+    }
+  }
+
+  void drawAuthErrorExtras() {
+    _frame.setTextSize(1);
+    _frame.setTextColor(COL_EYE, COL_BG);
+    const char *msg = "invalid session key";
+    _frame.setCursor((_frame.width() - _frame.textWidth(msg)) / 2,
+                     _frame.height() - 12);
+    _frame.print(msg);
+  }
+
   void drawSleepExtras(uint32_t now) {
     // floating z Z z
     const int cx = _frame.width() / 2 + 46;
@@ -120,13 +163,6 @@ private:
     if (v >= 1000) snprintf(out, n, "$%.0f", v);
     else if (v >= 100) snprintf(out, n, "$%.0f", v);
     else snprintf(out, n, "$%.1f", v);
-  }
-
-  static void fmtTokens(char *out, size_t n, uint64_t t) {
-    if (t >= 1000000000ULL) snprintf(out, n, "%.1fG", t / 1e9);
-    else if (t >= 1000000ULL) snprintf(out, n, "%.1fM", t / 1e6);
-    else if (t >= 1000ULL) snprintf(out, n, "%.1fk", t / 1e3);
-    else snprintf(out, n, "%llu", t);
   }
 
   uint16_t budgetColor(float spent, float total) {
@@ -157,6 +193,21 @@ private:
       _frame.fillSmoothRoundRect(x, by, (int)(w * r), bh, 1, budgetColor(spent, total));
   }
 
+  // One column of "top 3 models + share". The percent sits on the column's
+  // outer edge, so a left+right pair mirrors as "68% fable ... opus 66%" —
+  // the same mirroring the MO/DAY budget cells use below.
+  void drawModelColumn(const ModelShare *models, int y, bool leftSide) {
+    char buf[24];
+    for (int i = 0; i < 3; i++) {
+      if (!models[i].name[0]) continue;
+      if (leftSide) snprintf(buf, sizeof buf, "%d%% %s", models[i].pct, models[i].name);
+      else          snprintf(buf, sizeof buf, "%s %d%%", models[i].name, models[i].pct);
+      _frame.setCursor(leftSide ? 6 : (_frame.width() - 4 - _frame.textWidth(buf)), y);
+      _frame.print(buf);
+      y += 14;
+    }
+  }
+
   void drawStats(uint32_t now) {
     const Stats &s = app.stats;
     _frame.setTextSize(1);
@@ -168,30 +219,9 @@ private:
       _frame.print("data stale...");
     }
 
-    // left column: tokens + last month
-    char buf[24], tok[12];
-    int y = 22;
-    fmtTokens(tok, sizeof tok, s.todayTokens);
-    snprintf(buf, sizeof buf, "tok day %s", tok);
-    _frame.setCursor(6, y); _frame.print(buf); y += 14;
-    fmtTokens(tok, sizeof tok, s.monthTokens);
-    snprintf(buf, sizeof buf, "tok mon %s", tok);
-    _frame.setCursor(6, y); _frame.print(buf); y += 14;
-    char lm[16]; fmtMoney(lm, sizeof lm, s.lastMonth);
-    snprintf(buf, sizeof buf, "last mo %s", lm);
-    _frame.setCursor(6, y); _frame.print(buf);
-
-    // right column: today's top models, right-aligned (static, no swapping)
-    const ModelShare *models = s.todayModels;
-    int rEdge = _frame.width() - 4;
-    y = 22;
-    for (int i = 0; i < 3; i++) {
-      if (!models[i].name[0]) continue;
-      snprintf(buf, sizeof buf, "%s %d%%", models[i].name, models[i].pct);
-      _frame.setCursor(rEdge - _frame.textWidth(buf), y);
-      _frame.print(buf);
-      y += 14;
-    }
+    // Model shares, matching the budget cells below: month left, today right.
+    drawModelColumn(s.monthModels, 22, /*leftSide=*/true);
+    drawModelColumn(s.todayModels, 22, /*leftSide=*/false);
 
     // bottom: usage graphs side by side, below the eyes — month left, day right
     const int gap = 10;

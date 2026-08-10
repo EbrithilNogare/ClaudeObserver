@@ -43,12 +43,12 @@ def _budget_from_extra(extra) -> tuple | None:
     return extra["used_credits"] / 100, extra["monthly_limit"] / 100
 
 
-def _fetch_oauth_extra():
+def _fetch_oauth_extra() -> tuple:
     """`extra_usage` via the Claude Code OAuth token in ~/.claude/.credentials.json.
 
-    Returns None if the token is missing or expired — on many machines (e.g.
-    enterprise SSO logins) this credential is stale and never refreshes, so the
-    cookie fallback below is what actually carries the data.
+    Returns (extra_usage_or_None, auth_error: bool).
+    auth_error=True only when a token is present but explicitly rejected (4xx).
+    Returns (None, False) when the token is simply missing/expired.
     """
     try:
         creds = json.loads(
@@ -57,7 +57,7 @@ def _fetch_oauth_extra():
         token = creds.get("accessToken")
         expires_ms = creds.get("expiresAt", 0)
         if not token or (expires_ms and time.time() * 1000 > expires_ms - 60_000):
-            return None
+            return None, False
         req = urllib.request.Request(
             "https://api.anthropic.com/api/oauth/usage",
             headers={
@@ -65,35 +65,51 @@ def _fetch_oauth_extra():
                 "anthropic-beta": "oauth-2025-04-20",
             },
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.load(resp).get("extra_usage")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.load(resp).get("extra_usage"), False
+        except urllib.error.HTTPError as http_exc:
+            if http_exc.code in (401, 403):
+                log.warning("oauth token rejected (%d) — key may be invalid", http_exc.code)
+                return None, True
+            raise
     except Exception as exc:  # noqa: BLE001 — always fall back to estimates
         log.debug("oauth usage endpoint unavailable: %s", exc)
-        return None
+        return None, False
 
 
 def _load_session_creds(cfg: dict) -> tuple:
-    """(session_key, org_id): prefer secrets/config, else ~/.claude/claude_usage_config.json."""
+    """(session_key, org_id): prefer secrets/config, else ~/.claude/claude_usage_config.json.
+
+    Resolved per-field, NOT all-or-nothing: a secrets.json holding only a fresh
+    session_key must still win over the (often stale) key in the usage config,
+    borrowing just the missing org_id from it. Treating the pair atomically here
+    silently discarded a freshly-pasted key whenever org_id was absent.
+    """
     key, org = cfg.get("session_key"), cfg.get("org_id")
     if key and org:
         return key, org
     try:
         uc = json.loads(USAGE_CONFIG.read_text())
-        return uc.get("session_key"), uc.get("org_id")
     except Exception:  # noqa: BLE001
-        return None, None
+        uc = {}
+    return key or uc.get("session_key"), org or uc.get("org_id")
 
 
-def _fetch_cookie_extra(cfg: dict):
+def _fetch_cookie_extra(cfg: dict) -> tuple:
     """`extra_usage` via a claude.ai browser sessionKey — works when the OAuth token is stale.
 
     claude.ai sits behind Cloudflare, so the request must present a real browser
     TLS fingerprint; curl_cffi's chrome impersonation does that. Plain urllib is
     tried only as a last resort (usually served a Cloudflare challenge instead).
+
+    Returns (extra_usage_or_None, auth_error: bool).
+    auth_error=True only when credentials are present but explicitly rejected (4xx).
+    Returns (None, False) when credentials are simply absent.
     """
     key, org = _load_session_creds(cfg)
     if not key or not org:
-        return None
+        return None, False
     url = f"https://claude.ai/api/organizations/{org}/usage"
     try:
         try:
@@ -104,30 +120,53 @@ def _fetch_cookie_extra(cfg: dict):
                 headers={"User-Agent": "Mozilla/5.0"},
                 impersonate="chrome110",
             )
+            if resp.status_code in (401, 403):
+                log.warning("sessionKey rejected (%d) — key may be expired", resp.status_code)
+                return None, True
             data = resp.json()
         except ImportError:
             req = urllib.request.Request(
                 url, headers={"User-Agent": "Mozilla/5.0", "Cookie": f"sessionKey={key}"}
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.load(resp)
-        return data.get("extra_usage")
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.load(resp)
+            except urllib.error.HTTPError as http_exc:
+                if http_exc.code in (401, 403):
+                    log.warning("sessionKey rejected (%d) — key may be expired", http_exc.code)
+                    return None, True
+                raise
+        return data.get("extra_usage"), False
     except Exception as exc:  # noqa: BLE001 — always fall back to estimates
         log.debug("cookie usage endpoint unavailable: %s", exc)
-        return None
+        return None, False
 
 
-def fetch_official_budget(cfg: dict):
+def fetch_official_budget(cfg: dict) -> tuple:
     """Official monthly (used, limit) in USD from claude.ai's usage endpoint.
 
-    Tries the OAuth token first, then the browser sessionKey. Returns None on
-    any failure (no valid auth, no extra-usage billing, network) — callers fall
-    back to config + JSONL estimates.
+    Tries the OAuth token first, then the browser sessionKey.
+    Returns (budget_or_None, auth_error: bool).
+
+    auth_error=True signals that credentials ARE present but were explicitly
+    rejected — the caller should surface this to the user (e.g. via the display).
+    budget=None with auth_error=False means no auth configured or a transient
+    network failure; callers fall back to config + JSONL estimates.
     """
-    budget = _budget_from_extra(_fetch_oauth_extra())
+    extra, oauth_auth_err = _fetch_oauth_extra()
+    budget = _budget_from_extra(extra)
     if budget:
-        return budget
-    return _budget_from_extra(_fetch_cookie_extra(cfg))
+        return budget, False
+
+    # A rejected OAuth token must NOT short-circuit the cookie path: on
+    # enterprise/SSO logins that token is routinely stale, and the sessionKey
+    # is what actually carries the data. Only report an auth error if the
+    # cookie path also fails to produce a budget.
+    extra, cookie_auth_err = _fetch_cookie_extra(cfg)
+    budget = _budget_from_extra(extra)
+    if budget:
+        return budget, False
+    return None, (cookie_auth_err or oauth_auth_err)
 
 
 # ---------------------------------------------------------------- usage collection
@@ -149,15 +188,6 @@ def _cost_usd(model: str, usage: dict, pricing: dict) -> float:
         + usage.get("cache_creation_input_tokens", 0) * p["cache_write"]
         + usage.get("cache_read_input_tokens", 0) * p["cache_read"]
     ) / 1_000_000
-
-
-def _total_tokens(usage: dict) -> int:
-    return (
-        usage.get("input_tokens", 0)
-        + usage.get("output_tokens", 0)
-        + usage.get("cache_creation_input_tokens", 0)
-        + usage.get("cache_read_input_tokens", 0)
-    )
 
 
 def _top3(models: dict) -> list:
@@ -189,15 +219,15 @@ class UsageCollector:
         # path -> (mtime, byte offset already consumed)
         self._files: dict = {}
         self._seen = set()  # (message.id, requestId) dedup — retried/streamed entries repeat
-        # per-day running totals, pruned to the last-month..this-month window
+        # per-day running totals, pruned to the current-month window
         self._day_cost = defaultdict(float)
-        self._day_tokens = defaultdict(int)
         self._day_models = defaultdict(lambda: defaultdict(float))  # day -> fam -> cost
         self._day_sessions = defaultdict(set)
         self._min_day = None  # oldest day we retain, set each refresh
 
         self._official = None       # cached (used, limit)
         self._official_at = 0.0     # monotonic-ish wall time of last fetch
+        self._auth_error = False    # True when creds present but rejected
         # start-of-day value of the official monthly counter (gitignored,
         # survives restarts) — lets us derive today's real spend incl. web
         self._baseline_path = Path(__file__).parent / "day_baseline.json"
@@ -224,9 +254,9 @@ class UsageCollector:
         self._seen.add(key)
         model = msg.get("model", "unknown")
         fam = _model_family(model)
-        self._day_cost[day] += _cost_usd(model, usage, self.pricing)
-        self._day_tokens[day] += _total_tokens(usage)
-        self._day_models[day][fam] += _cost_usd(model, usage, self.pricing)
+        cost = _cost_usd(model, usage, self.pricing)
+        self._day_cost[day] += cost
+        self._day_models[day][fam] += cost
         sid = rec.get("sessionId")
         if sid:
             self._day_sessions[day].add(sid)
@@ -252,9 +282,8 @@ class UsageCollector:
 
     def refresh(self) -> None:
         """Scan for changed files and ingest only their appended bytes."""
-        today = date.today()
-        month_start = today.replace(day=1)
-        self._min_day = (month_start - date.resolution).replace(day=1)
+        # Only the current month is reported now, so nothing older needs reading.
+        self._min_day = date.today().replace(day=1)
         scan_from = datetime.combine(self._min_day, datetime.min.time()).astimezone()
 
         for path in self.projects.glob("*/*.jsonl"):
@@ -274,7 +303,7 @@ class UsageCollector:
         self._prune(self._min_day)
 
     def _prune(self, min_day) -> None:
-        for bucket in (self._day_cost, self._day_tokens, self._day_models, self._day_sessions):
+        for bucket in (self._day_cost, self._day_models, self._day_sessions):
             for d in [d for d in bucket if d < min_day]:
                 del bucket[d]
 
@@ -283,7 +312,8 @@ class UsageCollector:
     def _official_budget(self):
         now = time.time()
         if self._official is None or now - self._official_at >= self.official_ttl:
-            fetched = fetch_official_budget(self.cfg)
+            fetched, auth_err = fetch_official_budget(self.cfg)
+            self._auth_error = auth_err
             if fetched:
                 self._official = fetched
             self._official_at = now
@@ -322,8 +352,6 @@ class UsageCollector:
         month_start = today.replace(day=1)
 
         month_cost = sum(c for d, c in self._day_cost.items() if d >= month_start)
-        last_month_cost = sum(c for d, c in self._day_cost.items() if d < month_start)
-        month_tokens = sum(t for d, t in self._day_tokens.items() if d >= month_start)
         month_models = defaultdict(float)
         for d, fams in self._day_models.items():
             if d >= month_start:
@@ -346,20 +374,106 @@ class UsageCollector:
         )
         day_budget = (monthly_budget - month_cost + day_spent) / max(weekdays_left, 1)
 
-        return {
+        snap = {
             "mb": [round(month_cost, 2), monthly_budget],
             "db": [round(day_spent, 2), round(day_budget, 2)],
             "tm": _top3(self._day_models.get(today, {})),
             "mm": _top3(month_models),
-            "lm": round(last_month_cost, 2),
             "ses": len(self._day_sessions.get(today, set())),
-            "tt": self._day_tokens.get(today, 0),
-            "mt": month_tokens,
         }
+        if self._auth_error:
+            snap["ae"] = 1  # auth error — credentials present but rejected
+        return snap
 
     def collect(self) -> dict:
         self.refresh()
         return self.snapshot()
+
+
+# ---------------------------------------------------------------- session-key prompt
+
+def _osascript_ask(prompt_text: str, title: str) -> str | None:
+    """Show a macOS input dialog; return the trimmed answer or None if cancelled."""
+    import subprocess
+
+    line1 = f'set msg to {prompt_text}'
+    line2 = (
+        f'display dialog msg default answer ""'
+        f' with title "{title}" with icon caution'
+        f' buttons {{"Cancel", "Save"}} default button "Save"'
+    )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", line1, "-e", line2],
+            capture_output=True, text=True, timeout=300,
+        )
+    except Exception as exc:
+        log.error("osascript failed to launch: %s", exc)
+        return None
+
+    if result.returncode != 0:
+        if result.stderr.strip():
+            log.warning("osascript error: %s", result.stderr.strip())
+        else:
+            log.info("user cancelled osascript dialog")
+        return None
+
+    # Output: "button returned:Save, text returned:<value>"
+    # Use rfind so a comma inside the answer value doesn't break parsing.
+    out = result.stdout.strip()
+    marker = "text returned:"
+    idx = out.rfind(marker)
+    if idx == -1:
+        return None
+    return out[idx + len(marker):].strip() or None
+
+
+def _prompt_new_session_key(cfg: dict) -> bool:
+    """Ask the user for a new sessionKey (and org_id if missing). Updates secrets.json.
+
+    Returns True if a new key was saved, False if the user cancelled.
+    """
+    secrets_path = BASE / "secrets.json"
+    try:
+        secrets = json.loads(secrets_path.read_text()) if secrets_path.exists() else {}
+    except Exception:
+        secrets = {}
+
+    prompt_text = (
+        '"ClaudeObserver: session key rejected (403)."'
+        ' & return & return'
+        ' & "Paste the new sessionKey from claude.ai:"'
+        ' & return & "(DevTools → Application → Cookies → sessionKey)"'
+    )
+    new_key = _osascript_ask(prompt_text, "ClaudeObserver")
+    if not new_key:
+        return False
+    secrets["session_key"] = new_key
+    log.info("new sessionKey accepted (%d chars)", len(new_key))
+
+    # Pin org_id into secrets.json alongside the key. It may already be
+    # resolvable from claude_usage_config.json — copy that value rather than
+    # asking, so the two credentials always travel together in one file.
+    if not secrets.get("org_id"):
+        _, resolved_org = _load_session_creds(cfg)
+        if resolved_org:
+            secrets["org_id"] = resolved_org
+            log.info("org_id copied from claude_usage_config.json")
+        else:
+            org_prompt = (
+                '"org_id is missing."'
+                ' & return & return'
+                ' & "Paste your org UUID from:"'
+                ' & return & "https://claude.ai/api/organizations"'
+            )
+            org_id = _osascript_ask(org_prompt, "ClaudeObserver — org_id")
+            if org_id:
+                secrets["org_id"] = org_id
+                log.info("org_id saved")
+
+    secrets_path.write_text(json.dumps(secrets, indent=2))
+    log.info("secrets.json updated")
+    return True
 
 
 # ---------------------------------------------------------------- BLE
@@ -382,6 +496,35 @@ async def push_loop(cfg: dict):
 
     interval = cfg.get("update_interval_seconds", 60)
     collector = UsageCollector(cfg)
+    _prompting = False          # guard: only one dialog open at a time
+    _suppress_until = 0.0      # don't re-prompt before this time.time() value
+
+    async def _handle_auth_error() -> None:
+        """Prompt the user for a new key (once at a time) and reload state."""
+        nonlocal cfg, _prompting, _suppress_until
+        if _prompting or time.time() < _suppress_until:
+            return
+        _prompting = True
+        try:
+            saved = await asyncio.to_thread(_prompt_new_session_key, cfg)
+            if saved:
+                # Reload config so the new key is picked up, and reset the
+                # official-budget cache so the next collect() retries at once.
+                cfg = load_config()
+                collector.cfg = cfg
+                collector._official = None
+                collector._official_at = 0.0
+                collector._auth_error = False
+                # Suppress re-prompts for 5 minutes — gives the daemon time to
+                # test the new key and avoids spamming if it's still rejected.
+                _suppress_until = time.time() + 300
+            else:
+                log.info("user cancelled key prompt — will keep showing XX eyes")
+                # Don't re-open the dialog for 10 minutes after a cancellation.
+                _suppress_until = time.time() + 600
+        finally:
+            _prompting = False
+
     while True:
         device = await find_device(cfg)
         if device is None:
@@ -409,6 +552,13 @@ async def push_loop(cfg: dict):
                             ),
                             timeout=10,
                         )
+                    # Auth error: show XX eyes on the display and ask for a new key.
+                    if stats.get("ae"):
+                        task = asyncio.create_task(_handle_auth_error())
+                        task.add_done_callback(
+                            lambda t: log.error("auth-prompt task crashed: %s", t.exception())
+                            if not t.cancelled() and t.exception() else None
+                        )
                     # Sleep the interval, but wake immediately if the device drops.
                     try:
                         await asyncio.wait_for(dropped.wait(), timeout=interval)
@@ -425,6 +575,8 @@ def main():
     if "--once" in sys.argv:  # debug: print stats and exit, no BLE
         stats = UsageCollector(cfg).collect()
         print(json.dumps(stats, indent=2))
+        if stats.get("ae"):
+            _prompt_new_session_key(cfg)
         return
     asyncio.run(push_loop(cfg))
 

@@ -39,12 +39,10 @@ static void applyPayload(const String &json) {
   s.monthTotal = doc["mb"][1] | 0.0f;
   s.daySpent = doc["db"][0] | 0.0f;
   s.dayTotal = doc["db"][1] | 0.0f;
-  s.lastMonth = doc["lm"] | 0.0f;
   s.sessions = doc["ses"] | 0;
-  s.todayTokens = doc["tt"] | 0ULL;
-  s.monthTokens = doc["mt"] | 0ULL;
   copyModels(doc["tm"].as<JsonArray>(), s.todayModels);
   copyModels(doc["mm"].as<JsonArray>(), s.monthModels);
+  app.authError = (doc["ae"] | 0) != 0;
   app.hasData = true;
   app.lastUpdateMs = millis();
   Serial.printf("[data] month $%.2f/%.0f\n", s.monthSpent, s.monthTotal);

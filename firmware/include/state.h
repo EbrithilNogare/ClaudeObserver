@@ -9,9 +9,7 @@ struct ModelShare {
 struct Stats {
   float monthSpent = 0, monthTotal = 0;
   float daySpent = 0, dayTotal = 0;
-  float lastMonth = 0;
   uint32_t sessions = 0;
-  uint64_t todayTokens = 0, monthTokens = 0;
   ModelShare todayModels[3];
   ModelShare monthModels[3];
 };
@@ -19,6 +17,7 @@ struct Stats {
 struct AppState {
   volatile bool connected = false;
   volatile bool hasData = false;
+  volatile bool authError = false;         // daemon: creds present but rejected
   uint32_t lastUpdateMs = 0;
   volatile uint16_t connHandle = 0xFFFF;  // BLE_HS_CONN_HANDLE_NONE
   int8_t rssi = 0;                        // BLE signal strength (dBm), <0
