@@ -61,11 +61,19 @@ private:
   }
 
   // ---------------- eyes ----------------
+  // Shared eye geometry, also used by the XX (auth error) variant.
+  static constexpr int EYE_GAP = 41;   // centre-to-centre / 2
+  static constexpr int EYE_W = 29;
+  static constexpr int EYE_H = 73;
+  // Stats view: sit midway between the top of the display and the bottom text
+  // row, so the eyes stay optically centred in the space that's left.
+  static constexpr int EYE_CY_STATS = 76;
+
   // Two black vertical rounded bars, Claude-style. Blink = height squash.
   void drawEyes(uint32_t now, bool sleeping) {
     const int cx = _frame.width() / 2;
-    const int cy = sleeping ? _frame.height() / 2 : 88;
-    const int gap = 29, eyeW = 21, eyeH = 52;
+    const int cy = sleeping ? _frame.height() / 2 : EYE_CY_STATS;
+    const int gap = EYE_GAP, eyeW = EYE_W, eyeH = EYE_H;
 
     float openness = 1.0f;
     if (sleeping) {
@@ -94,7 +102,7 @@ private:
     for (int side = -1; side <= 1; side += 2) {
       int x = cx + side * gap - eyeW / 2;
       int y = cy - h / 2 + bob;
-      _frame.fillSmoothRoundRect(x, y, eyeW, h, min(9, h / 2), COL_EYE);
+      _frame.fillSmoothRoundRect(x, y, eyeW, h, min(13, h / 2), COL_EYE);
     }
   }
 
@@ -103,7 +111,7 @@ private:
   void drawDeadEyes(uint32_t now) {
     const int cx = _frame.width() / 2;
     const int cy = _frame.height() / 2;
-    const int gap = 29, eyeW = 21, eyeH = 52;
+    const int gap = EYE_GAP, eyeW = EYE_W, eyeH = EYE_H;
     // subtle pulse so the display doesn't look frozen
     float pulse = 0.85f + 0.15f * sinf(now / 600.0f);
     uint16_t col = COL_EYE;
@@ -113,7 +121,7 @@ private:
       int ey = cy;               // eye centre Y
       int hw = (int)(eyeW * 0.45f * pulse);  // half-width of the X arms
       int hh = (int)(eyeH * 0.45f * pulse);  // half-height
-      int th = 3;                             // arm thickness (half)
+      int th = 4;                             // arm thickness (half)
       // diagonal \ — top-left to bottom-right
       for (int t = -th; t <= th; t++) {
         _frame.drawLine(ex - hw + t, ey - hh, ex + hw + t, ey + hh, col);
@@ -138,7 +146,7 @@ private:
 
   void drawSleepExtras(uint32_t now) {
     // floating z Z z
-    const int cx = _frame.width() / 2 + 46;
+    const int cx = _frame.width() / 2 + 62;  // clear of the wider eyes
     const int cy = _frame.height() / 2 - 16;
     static const char *zs[3] = {"z", "Z", "z"};
     for (int i = 0; i < 3; i++) {
@@ -193,19 +201,20 @@ private:
       _frame.fillSmoothRoundRect(x, by, (int)(w * r), bh, 1, budgetColor(spent, total));
   }
 
-  // One column of "top 3 models + share". The percent sits on the column's
-  // outer edge, so a left+right pair mirrors as "68% fable ... opus 66%" —
-  // the same mirroring the MO/DAY budget cells use below.
-  void drawModelColumn(const ModelShare *models, int y, bool leftSide) {
-    char buf[24];
+  // Month model shares on one line: "54% fable | 10% opus | 5% sonnet".
+  // Shares the top row with the temp/RSSI readout, which is right-aligned.
+  void drawModelLine(const ModelShare *models, int x, int y) {
+    char buf[64];
+    int n = 0;
     for (int i = 0; i < 3; i++) {
       if (!models[i].name[0]) continue;
-      if (leftSide) snprintf(buf, sizeof buf, "%d%% %s", models[i].pct, models[i].name);
-      else          snprintf(buf, sizeof buf, "%s %d%%", models[i].name, models[i].pct);
-      _frame.setCursor(leftSide ? 6 : (_frame.width() - 4 - _frame.textWidth(buf)), y);
-      _frame.print(buf);
-      y += 14;
+      n += snprintf(buf + n, sizeof buf - n, "%s%d%% %s", n ? " | " : "",
+                    models[i].pct, models[i].name);
+      if (n >= (int)sizeof buf) break;
     }
+    if (!n) return;
+    _frame.setCursor(x, y);
+    _frame.print(buf);
   }
 
   void drawStats(uint32_t now) {
@@ -213,15 +222,14 @@ private:
     _frame.setTextSize(1);
     _frame.setTextColor(COL_EYE, COL_BG);
 
-    // top-left: stale marker only
+    // Top row, left side: month model shares — or the stale marker in their
+    // place, since the right side of the row belongs to the temp/RSSI readout.
     if (millis() - app.lastUpdateMs > DATA_STALE_MS) {
       _frame.setCursor(6, 2);
       _frame.print("data stale...");
+    } else {
+      drawModelLine(s.monthModels, 6, 2);
     }
-
-    // Model shares, matching the budget cells below: month left, today right.
-    drawModelColumn(s.monthModels, 22, /*leftSide=*/true);
-    drawModelColumn(s.todayModels, 22, /*leftSide=*/false);
 
     // bottom: usage graphs side by side, below the eyes — month left, day right
     const int gap = 10;
