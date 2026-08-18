@@ -104,6 +104,17 @@ static void updateSensors(uint32_t now) {
   if (now - last < 1000) return;
   last = now;
   app.espTempC = temperatureRead();
+  // Battery: one sample per tick, undo the 2:1 divider, then fold it into a
+  // running mean of the last ~BATT_AVG_SAMPLES ticks. The mean converges at
+  // full weight while the first samples arrive, then decays exponentially.
+  float v = analogReadMilliVolts(PIN_BATT_ADC) / 1000.0f * BATT_DIVIDER;
+  static float battAvg = 0;
+  static uint16_t battN = 0;
+  if (battN < BATT_AVG_SAMPLES) battN++;
+  battAvg += (v - battAvg) / battN;
+  app.battV = battAvg;
+  float pct = (app.battV - BATT_MIN_V) / (BATT_MAX_V - BATT_MIN_V) * 100.0f;
+  app.battPct = (uint8_t)constrain(pct, 0.0f, 100.0f);
   if (app.connected && app.connHandle != 0xFFFF) {
     int8_t r;
     if (ble_gap_conn_rssi(app.connHandle, &r) == 0) app.rssi = r;
@@ -125,6 +136,7 @@ void setup() {
   Serial.begin(115200);
   Serial.println("[boot] ClaudeObserver starting");
   antennaBegin();
+  analogSetPinAttenuation(PIN_BATT_ADC, ADC_11db);  // full-scale ~3.1 V at the pin
   ui.begin();
   bleBegin();
 }

@@ -22,6 +22,8 @@ struct AppState {
   volatile uint16_t connHandle = 0xFFFF;  // BLE_HS_CONN_HANDLE_NONE
   int8_t rssi = 0;                        // BLE signal strength (dBm), <0
   float espTempC = 0;                     // ESP32 internal temperature
+  float battV = 0;                        // battery volts (A1 reading * 2)
+  uint8_t battPct = 0;                    // 0-100 %, mapped over 3.3-4.1 V
   Stats stats;
 };
 

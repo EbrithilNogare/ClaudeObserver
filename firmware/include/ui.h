@@ -47,13 +47,13 @@ public:
 
 private:
   // ---------------- top-right readout ----------------
-  // ESP temperature (e.g. "42C") and BLE signal strength (e.g. "-67db").
+  // Battery (e.g. "78%"), ESP temperature ("42C") and BLE signal ("-67db").
   void drawCorner() {
-    char buf[20];
+    char buf[28];
     if (app.connected)
-      snprintf(buf, sizeof buf, "%.0fC %ddb", app.espTempC, app.rssi);
+      snprintf(buf, sizeof buf, "%u%% %.0fC %ddb", app.battPct, app.espTempC, app.rssi);
     else
-      snprintf(buf, sizeof buf, "%.0fC", app.espTempC);
+      snprintf(buf, sizeof buf, "%u%% %.0fC", app.battPct, app.espTempC);
     _frame.setTextSize(1);
     _frame.setTextColor(COL_EYE, COL_BG);
     _frame.setCursor(_frame.width() - 3 - _frame.textWidth(buf), 2);

@@ -9,6 +9,7 @@
 #define PIN_LCD_DC    20  // D9
 #define PIN_LCD_RST   23  // D5
 #define PIN_LCD_BL    2   // D2
+#define PIN_BATT_ADC  1   // A1 — battery through a 2:1 divider (Vbat = 2 * Vadc)
 
 // ---------------- display ----------------
 #define LCD_WIDTH   170
@@ -20,6 +21,12 @@
 // ---------------- behaviour ----------------
 #define DATA_STALE_MS      (5 * 60 * 1000)  // no BLE update for 5 min -> stale marker
 #define FRAME_MS           33               // ~30 fps animations
+
+// Battery: LiPo read on A1 through a 2:1 resistor divider.
+#define BATT_DIVIDER       2.0f
+#define BATT_MIN_V         3.3f   // 0 %
+#define BATT_MAX_V         4.1f   // 100 %
+#define BATT_AVG_SAMPLES   60     // running mean window (1 sample/s)
 
 // Antenna: unlike the S3, the XIAO ESP32-C6 has an RF switch that must be
 // driven — GPIO14 LOW enables the switch, GPIO3 selects the antenna
