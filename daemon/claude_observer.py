@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Claude Observer daemon.
 
-Collects Claude Code usage statistics from local JSONL transcripts
-(~/.claude/projects/**/*.jsonl), computes budgets/model splits,
-and pushes a compact JSON payload over BLE to the ESP32 display.
+Polls the official Claude usage endpoint for the monthly spend/limit, keeps a
+per-day record of that monthly counter, and pushes a compact JSON payload over
+BLE to the ESP32 display. Today's spend is simply
+`current monthly total - the highest total seen on an earlier day`.
 """
 
 import asyncio
@@ -13,11 +14,11 @@ import logging
 import sys
 import time
 import urllib.request
-from collections import defaultdict
-from datetime import datetime, date
+from datetime import date
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
+HISTORY = BASE / "daily_spend.json"
 log = logging.getLogger("claude-observer")
 
 
@@ -31,13 +32,13 @@ def load_config() -> dict:
     return cfg
 
 
-# ---------------------------------------------------------------- official budget
+# ---------------------------------------------------------------- official usage
 
 USAGE_CONFIG = Path.home() / ".claude" / "claude_usage_config.json"
 
 
 def _budget_from_extra(extra) -> tuple | None:
-    """Extract monthly (used, limit) in USD from an `extra_usage` block."""
+    """Monthly (used, limit) in USD from an `extra_usage` block."""
     if not extra or not extra.get("is_enabled"):
         return None
     return extra["used_credits"] / 100, extra["monthly_limit"] / 100
@@ -46,9 +47,8 @@ def _budget_from_extra(extra) -> tuple | None:
 def _fetch_oauth_extra() -> tuple:
     """`extra_usage` via the Claude Code OAuth token in ~/.claude/.credentials.json.
 
-    Returns (extra_usage_or_None, auth_error: bool).
-    auth_error=True only when a token is present but explicitly rejected (4xx).
-    Returns (None, False) when the token is simply missing/expired.
+    Returns (extra_usage_or_None, auth_error). auth_error is True only when a
+    token is present but explicitly rejected (401/403).
     """
     try:
         creds = json.loads(
@@ -70,10 +70,10 @@ def _fetch_oauth_extra() -> tuple:
                 return json.load(resp).get("extra_usage"), False
         except urllib.error.HTTPError as http_exc:
             if http_exc.code in (401, 403):
-                log.warning("oauth token rejected (%d) — key may be invalid", http_exc.code)
+                log.warning("oauth token rejected (%d)", http_exc.code)
                 return None, True
             raise
-    except Exception as exc:  # noqa: BLE001 — always fall back to estimates
+    except Exception as exc:  # noqa: BLE001 — never let a fetch kill the daemon
         log.debug("oauth usage endpoint unavailable: %s", exc)
         return None, False
 
@@ -83,8 +83,7 @@ def _load_session_creds(cfg: dict) -> tuple:
 
     Resolved per-field, NOT all-or-nothing: a secrets.json holding only a fresh
     session_key must still win over the (often stale) key in the usage config,
-    borrowing just the missing org_id from it. Treating the pair atomically here
-    silently discarded a freshly-pasted key whenever org_id was absent.
+    borrowing just the missing org_id from it.
     """
     key, org = cfg.get("session_key"), cfg.get("org_id")
     if key and org:
@@ -97,15 +96,11 @@ def _load_session_creds(cfg: dict) -> tuple:
 
 
 def _fetch_cookie_extra(cfg: dict) -> tuple:
-    """`extra_usage` via a claude.ai browser sessionKey — works when the OAuth token is stale.
+    """`extra_usage` via a claude.ai browser sessionKey — works when OAuth is stale.
 
-    claude.ai sits behind Cloudflare, so the request must present a real browser
-    TLS fingerprint; curl_cffi's chrome impersonation does that. Plain urllib is
-    tried only as a last resort (usually served a Cloudflare challenge instead).
-
-    Returns (extra_usage_or_None, auth_error: bool).
-    auth_error=True only when credentials are present but explicitly rejected (4xx).
-    Returns (None, False) when credentials are simply absent.
+    claude.ai sits behind Cloudflare, so the request needs a real browser TLS
+    fingerprint; curl_cffi's chrome impersonation provides one. Plain urllib is
+    only a last resort (usually served a Cloudflare challenge instead).
     """
     key, org = _load_session_creds(cfg)
     if not key or not org:
@@ -133,261 +128,95 @@ def _fetch_cookie_extra(cfg: dict) -> tuple:
                     data = json.load(resp)
             except urllib.error.HTTPError as http_exc:
                 if http_exc.code in (401, 403):
-                    log.warning("sessionKey rejected (%d) — key may be expired", http_exc.code)
+                    log.warning("sessionKey rejected (%d)", http_exc.code)
                     return None, True
                 raise
         return data.get("extra_usage"), False
-    except Exception as exc:  # noqa: BLE001 — always fall back to estimates
-        log.debug("cookie usage endpoint unavailable: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("claude.ai usage endpoint unavailable: %s", exc)
         return None, False
 
 
-def fetch_official_budget(cfg: dict) -> tuple:
-    """Official monthly (used, limit) in USD from claude.ai's usage endpoint.
+def fetch_usage(cfg: dict) -> tuple:
+    """((monthly_used, monthly_limit) or None, auth_error).
 
-    Tries the OAuth token first, then the browser sessionKey.
-    Returns (budget_or_None, auth_error: bool).
-
-    auth_error=True signals that credentials ARE present but were explicitly
-    rejected — the caller should surface this to the user (e.g. via the display).
-    budget=None with auth_error=False means no auth configured or a transient
-    network failure; callers fall back to config + JSONL estimates.
+    OAuth first, then the browser cookie. A rejected OAuth token must not
+    short-circuit the cookie path: on enterprise/SSO logins that token is
+    routinely stale and the sessionKey is what carries the data.
     """
-    extra, oauth_auth_err = _fetch_oauth_extra()
+    extra, oauth_err = _fetch_oauth_extra()
     budget = _budget_from_extra(extra)
     if budget:
         return budget, False
-
-    # A rejected OAuth token must NOT short-circuit the cookie path: on
-    # enterprise/SSO logins that token is routinely stale, and the sessionKey
-    # is what actually carries the data. Only report an auth error if the
-    # cookie path also fails to produce a budget.
-    extra, cookie_auth_err = _fetch_cookie_extra(cfg)
+    extra, cookie_err = _fetch_cookie_extra(cfg)
     budget = _budget_from_extra(extra)
     if budget:
         return budget, False
-    return None, (cookie_auth_err or oauth_auth_err)
+    return None, (cookie_err or oauth_err)
 
 
-# ---------------------------------------------------------------- usage collection
+# ---------------------------------------------------------------- daily history
 
-def _model_family(model: str) -> str:
-    """claude-opus-4-8 -> opus, claude-haiku-4-5-20251001 -> haiku ..."""
-    for fam in ("fable", "mythos", "opus", "sonnet", "haiku"):
-        if fam in model:
-            return fam
-    return model.replace("claude-", "").split("-")[0] or "other"
+def _record_day(used: float) -> float:
+    """Store today's monthly total and return today's spend.
 
-
-def _cost_usd(model: str, usage: dict, pricing: dict) -> float:
-    fam = _model_family(model)
-    p = pricing.get(fam, pricing.get("default"))
-    return (
-        usage.get("input_tokens", 0) * p["input"]
-        + usage.get("output_tokens", 0) * p["output"]
-        + usage.get("cache_creation_input_tokens", 0) * p["cache_write"]
-        + usage.get("cache_read_input_tokens", 0) * p["cache_read"]
-    ) / 1_000_000
-
-
-def _top3(models: dict) -> list:
-    total = sum(models.values()) or 1.0
-    ranked = sorted(models.items(), key=lambda kv: -kv[1])[:3]
-    return [[name, round(100 * cost / total)] for name, cost in ranked]
-
-
-class UsageCollector:
-    """Incremental aggregator over the JSONL transcripts.
-
-    A full rescan of every file each cycle is wasteful: 99%+ of the bytes are
-    unchanged and only the tail of one or two active files is ever new. This
-    keeps per-day running totals in memory and, each refresh, reads only the
-    bytes appended to files whose mtime/size changed since last time. The
-    official-budget network call is cached separately so it isn't hit every
-    cycle. State lives for the life of the process; a restart rebuilds it with
-    one full scan.
+    The endpoint only exposes a monthly running total, so per-day spend is a
+    delta: today = used - the highest total recorded on any earlier day. Each
+    day keeps [first_seen, last_seen] of the counter; `first_seen` is the
+    fallback baseline when there is no earlier day yet (a fresh install, or the
+    1st of the month), and a drop below it means the monthly counter reset.
     """
+    today = date.today().isoformat()
+    try:
+        hist = json.loads(HISTORY.read_text())
+    except (OSError, ValueError):
+        hist = {}
 
-    def __init__(self, cfg: dict):
-        self.cfg = cfg
-        self.pricing = cfg["pricing"]
-        self.projects = Path(
-            cfg.get("claude_projects_dir", str(Path.home() / ".claude" / "projects"))
-        ).expanduser()
-        self.official_ttl = cfg.get("official_budget_ttl_seconds", 300)
+    first, _ = hist.get(today, [used, used])
+    if used < first:  # counter reset (new billing month) — restart from here
+        first = used
+        hist = {k: v for k, v in hist.items() if k >= today}
+    hist[today] = [first, used]
 
-        # path -> (mtime, byte offset already consumed)
-        self._files: dict = {}
-        self._seen = set()  # (message.id, requestId) dedup — retried/streamed entries repeat
-        # per-day running totals, pruned to the current-month window
-        self._day_cost = defaultdict(float)
-        self._day_models = defaultdict(lambda: defaultdict(float))  # day -> fam -> cost
-        self._day_sessions = defaultdict(set)
-        self._min_day = None  # oldest day we retain, set each refresh
+    # Keep the current month only; anything older can't affect a delta.
+    cutoff = date.today().replace(day=1).isoformat()
+    hist = {k: v for k, v in hist.items() if k >= cutoff}
 
-        self._official = None       # cached (used, limit)
-        self._official_at = 0.0     # monotonic-ish wall time of last fetch
-        self._auth_error = False    # True when creds present but rejected
-        # start-of-day value of the official monthly counter (gitignored,
-        # survives restarts) — lets us derive today's real spend incl. web
-        self._baseline_path = Path(__file__).parent / "day_baseline.json"
+    earlier = [v[1] for k, v in hist.items() if k < today]
+    base = max(earlier) if earlier else first
 
-    # ---- ingest ----
+    try:
+        HISTORY.write_text(json.dumps(hist, indent=2, sort_keys=True))
+    except OSError as exc:
+        log.warning("cannot persist daily history: %s", exc)
+    return max(0.0, used - base)
 
-    def _ingest(self, rec: dict) -> None:
-        if rec.get("type") != "assistant":
-            return
-        msg = rec.get("message") or {}
-        usage = msg.get("usage")
-        ts = rec.get("timestamp")
-        if not usage or not ts:
-            return
-        key = (msg.get("id"), rec.get("requestId"))
-        if key in self._seen:
-            return
-        try:
-            day = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().date()
-        except ValueError:
-            return
-        if self._min_day and day < self._min_day:
-            return
-        self._seen.add(key)
-        model = msg.get("model", "unknown")
-        fam = _model_family(model)
-        cost = _cost_usd(model, usage, self.pricing)
-        self._day_cost[day] += cost
-        self._day_models[day][fam] += cost
-        sid = rec.get("sessionId")
-        if sid:
-            self._day_sessions[day].add(sid)
 
-    def _read_new_bytes(self, path: Path, offset: int) -> int:
-        """Consume complete (newline-terminated) lines from `offset`; return new offset."""
-        with path.open("rb") as fh:
-            fh.seek(offset)
-            data = fh.read()
-        if not data:
-            return offset
-        end = data.rfind(b"\n")
-        if end == -1:  # only a partial line so far — wait for it to complete
-            return offset
-        for raw in data[: end + 1].splitlines():
-            if b'"assistant"' not in raw and b'"usage"' not in raw:
-                continue
-            try:
-                self._ingest(json.loads(raw))
-            except json.JSONDecodeError:
-                continue
-        return offset + end + 1
-
-    def refresh(self) -> None:
-        """Scan for changed files and ingest only their appended bytes."""
-        # Only the current month is reported now, so nothing older needs reading.
-        self._min_day = date.today().replace(day=1)
-        scan_from = datetime.combine(self._min_day, datetime.min.time()).astimezone()
-
-        for path in self.projects.glob("*/*.jsonl"):
-            try:
-                st = path.stat()
-                if datetime.fromtimestamp(st.st_mtime).astimezone() < scan_from:
-                    continue
-                prev_mtime, offset = self._files.get(path, (None, 0))
-                if prev_mtime == st.st_mtime and offset == st.st_size:
-                    continue  # unchanged since last cycle — skip entirely
-                if st.st_size < offset:  # truncated/rotated — reread from start
-                    offset = 0
-                self._files[path] = (st.st_mtime, self._read_new_bytes(path, offset))
-            except OSError:
-                continue
-
-        self._prune(self._min_day)
-
-    def _prune(self, min_day) -> None:
-        for bucket in (self._day_cost, self._day_models, self._day_sessions):
-            for d in [d for d in bucket if d < min_day]:
-                del bucket[d]
-
-    # ---- output ----
-
-    def _official_budget(self):
-        now = time.time()
-        if self._official is None or now - self._official_at >= self.official_ttl:
-            fetched, auth_err = fetch_official_budget(self.cfg)
-            self._auth_error = auth_err
-            if fetched:
-                self._official = fetched
-            self._official_at = now
-        return self._official
-
-    def _official_day_spent(self, official_used: float, local_today: float) -> float:
-        """Today's spend from deltas of the official monthly counter.
-
-        The endpoint only exposes a monthly running total — but that total
-        includes claude.ai web usage the local JSONL estimate can't see, so we
-        persist its value at the start of each day and report used-minus-
-        baseline. The very first run seeds the baseline with the local
-        estimate (earlier web spend that day is unrecoverable).
-        """
-        today = date.today().isoformat()
-        try:
-            base = json.loads(self._baseline_path.read_text())
-        except (OSError, ValueError):
-            base = None
-        if base is None:  # first ever run — seed from the local estimate
-            base = {"day": today, "used": max(0.0, official_used - local_today)}
-        elif base["day"] != today:  # new day starts at zero
-            base = {"day": today, "used": official_used}
-        elif official_used < base["used"]:  # monthly counter reset mid-day
-            base = {"day": today, "used": 0.0}
-        else:
-            return official_used - base["used"]
-        try:
-            self._baseline_path.write_text(json.dumps(base))
-        except OSError as exc:
-            log.warning("cannot persist day baseline: %s", exc)
-        return official_used - base["used"]
-
-    def snapshot(self) -> dict:
-        today = date.today()
-        month_start = today.replace(day=1)
-
-        month_cost = sum(c for d, c in self._day_cost.items() if d >= month_start)
-        month_models = defaultdict(float)
-        for d, fams in self._day_models.items():
-            if d >= month_start:
-                for fam, c in fams.items():
-                    month_models[fam] += c
-
-        # Official spend/limit beats the JSONL estimate + configured fallback budget.
-        official = self._official_budget()
-        day_spent = self._day_cost.get(today, 0.0)
-        if official:
-            month_cost, monthly_budget = official
-            day_spent = self._official_day_spent(month_cost, day_spent)
-        else:
-            monthly_budget = float(self.cfg["monthly_budget_usd"])
-        days_in_month = calendar.monthrange(today.year, today.month)[1]
-        # Remaining budget spread over the weekdays left this month (incl. today).
-        weekdays_left = sum(
-            1 for day in range(today.day, days_in_month + 1)
-            if date(today.year, today.month, day).weekday() < 5
-        )
-        day_budget = (monthly_budget - month_cost + day_spent) / max(weekdays_left, 1)
-
-        snap = {
-            "mb": [round(month_cost, 2), monthly_budget],
-            "db": [round(day_spent, 2), round(day_budget, 2)],
-            "tm": _top3(self._day_models.get(today, {})),
-            "mm": _top3(month_models),
-            "ses": len(self._day_sessions.get(today, set())),
-        }
-        if self._auth_error:
-            snap["ae"] = 1  # auth error — credentials present but rejected
+def collect(cfg: dict) -> dict:
+    """Payload for the display: month [used, limit], day [used, budget]."""
+    usage, auth_error = fetch_usage(cfg)
+    if not usage:
+        snap = {"mb": [0.0, float(cfg["monthly_budget_usd"])], "db": [0.0, 0.0]}
+        if auth_error:
+            snap["ae"] = 1  # credentials present but rejected
         return snap
 
-    def collect(self) -> dict:
-        self.refresh()
-        return self.snapshot()
+    month_used, month_limit = usage
+    day_used = _record_day(month_used)
+
+    today = date.today()
+    days_in_month = calendar.monthrange(today.year, today.month)[1]
+    # Budget left at the start of today, spread over the weekdays remaining.
+    weekdays_left = sum(
+        1 for day in range(today.day, days_in_month + 1)
+        if date(today.year, today.month, day).weekday() < 5
+    )
+    day_budget = (month_limit - month_used + day_used) / max(weekdays_left, 1)
+
+    return {
+        "mb": [round(month_used, 2), month_limit],
+        "db": [round(day_used, 2), round(day_budget, 2)],
+    }
 
 
 # ---------------------------------------------------------------- session-key prompt
@@ -407,7 +236,7 @@ def _osascript_ask(prompt_text: str, title: str) -> str | None:
             ["osascript", "-e", line1, "-e", line2],
             capture_output=True, text=True, timeout=300,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         log.error("osascript failed to launch: %s", exc)
         return None
 
@@ -419,15 +248,13 @@ def _osascript_ask(prompt_text: str, title: str) -> str | None:
         return None
 
     # Output: "button returned:Save, text returned:<value>"
-    # Use rfind so a comma inside the answer value doesn't break parsing.
+    # rfind so a comma inside the answer doesn't break parsing.
     out = result.stdout.strip()
     marker = "text returned:"
     idx = out.rfind(marker)
     if idx == -1:
         return None
     return out[idx + len(marker):].strip() or None
-
-
 def _prompt_new_session_key(cfg: dict) -> bool:
     """Ask the user for a new sessionKey (and org_id if missing). Updates secrets.json.
 
@@ -495,35 +322,23 @@ async def push_loop(cfg: dict):
     from bleak import BleakClient
 
     interval = cfg.get("update_interval_seconds", 60)
-    collector = UsageCollector(cfg)
-    _prompting = False          # guard: only one dialog open at a time
-    _suppress_until = 0.0      # don't re-prompt before this time.time() value
+    prompting = False       # guard: only one dialog open at a time
+    suppress_until = 0.0    # don't re-prompt before this time.time() value
 
-    async def _handle_auth_error() -> None:
-        """Prompt the user for a new key (once at a time) and reload state."""
-        nonlocal cfg, _prompting, _suppress_until
-        if _prompting or time.time() < _suppress_until:
+    async def handle_auth_error() -> None:
+        nonlocal cfg, prompting, suppress_until
+        if prompting or time.time() < suppress_until:
             return
-        _prompting = True
+        prompting = True
         try:
-            saved = await asyncio.to_thread(_prompt_new_session_key, cfg)
-            if saved:
-                # Reload config so the new key is picked up, and reset the
-                # official-budget cache so the next collect() retries at once.
-                cfg = load_config()
-                collector.cfg = cfg
-                collector._official = None
-                collector._official_at = 0.0
-                collector._auth_error = False
-                # Suppress re-prompts for 5 minutes — gives the daemon time to
-                # test the new key and avoids spamming if it's still rejected.
-                _suppress_until = time.time() + 300
+            if await asyncio.to_thread(_prompt_new_session_key, cfg):
+                cfg = load_config()  # pick up the new key
+                suppress_until = time.time() + 300
             else:
                 log.info("user cancelled key prompt — will keep showing XX eyes")
-                # Don't re-open the dialog for 10 minutes after a cancellation.
-                _suppress_until = time.time() + 600
+                suppress_until = time.time() + 600
         finally:
-            _prompting = False
+            prompting = False
 
     while True:
         device = await find_device(cfg)
@@ -542,7 +357,7 @@ async def push_loop(cfg: dict):
             ) as client:
                 log.info("connected, streaming updates")
                 while client.is_connected and not dropped.is_set():
-                    stats = await asyncio.to_thread(collector.collect)
+                    stats = await asyncio.to_thread(collect, cfg)
                     payload = (json.dumps(stats, separators=(",", ":")) + "\n").encode()
                     log.info("sending %d bytes: %s", len(payload), payload[:120])
                     for i in range(0, len(payload), CHUNK):
@@ -552,9 +367,8 @@ async def push_loop(cfg: dict):
                             ),
                             timeout=10,
                         )
-                    # Auth error: show XX eyes on the display and ask for a new key.
-                    if stats.get("ae"):
-                        task = asyncio.create_task(_handle_auth_error())
+                    if stats.get("ae"):  # XX eyes on the display + ask for a new key
+                        task = asyncio.create_task(handle_auth_error())
                         task.add_done_callback(
                             lambda t: log.error("auth-prompt task crashed: %s", t.exception())
                             if not t.cancelled() and t.exception() else None
@@ -573,7 +387,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config()
     if "--once" in sys.argv:  # debug: print stats and exit, no BLE
-        stats = UsageCollector(cfg).collect()
+        stats = collect(cfg)
         print(json.dumps(stats, indent=2))
         if stats.get("ae"):
             _prompt_new_session_key(cfg)
