@@ -1,4 +1,6 @@
 #pragma once
+#include <driver/gpio.h>
+
 #include "lgfx_conf.h"
 #include "state.h"
 
@@ -11,9 +13,15 @@ class UI {
   bool _blinking = false;
 
 public:
-  void begin() {
+  // dark=true leaves the backlight off so the caller can fade in with
+  // playWakeAnim() instead of flashing a full-brightness frame first.
+  void begin(bool dark = false) {
+    // off() latches the backlight pin LOW with a pad hold, and that hold
+    // outlives the restart that ends a light sleep — release it before the PWM
+    // channel is attached or the backlight never comes back.
+    gpio_hold_dis((gpio_num_t)PIN_LCD_BL);
     ledcAttach(PIN_LCD_BL, 5000, 8);      // 5 kHz, 8-bit PWM backlight
-    ledcWrite(PIN_LCD_BL, LCD_BRIGHTNESS);  // ~60% brightness
+    ledcWrite(PIN_LCD_BL, dark ? 0 : LCD_BRIGHTNESS);
     _lcd.init();
     _lcd.setRotation(LCD_ROTATION);
     _lcd.fillScreen(COL_BG);  // visible immediately, even before first frame
@@ -27,9 +35,93 @@ public:
     _frame.setTextWrap(false);
   }
 
+  // Blank the panel and kill the backlight — called right before sleep so the
+  // display doesn't sit there lit with a frozen frame. Detaching the LEDC
+  // channel and driving the pin LOW matters: the PWM peripheral is clocked off
+  // in sleep, which would otherwise leave the backlight at an arbitrary level.
+  void off() {
+    ledcWrite(PIN_LCD_BL, 0);
+    _lcd.fillScreen(TFT_BLACK);
+    _lcd.sleep();
+    ledcDetach(PIN_LCD_BL);
+    pinMode(PIN_LCD_BL, OUTPUT);
+    digitalWrite(PIN_LCD_BL, LOW);
+    // Two separate things have to be pinned down, or the backlight comes up at
+    // full brightness the moment the chip sleeps:
+    //   1. the pad otherwise switches to its *sleep* configuration in light
+    //      sleep, which leaves it floating (and the module pulls BL high),
+    //   2. the pad hold latches the LOW level so nothing can drive it again
+    //      while the CPU is suspended.
+    gpio_sleep_sel_dis((gpio_num_t)PIN_LCD_BL);
+    gpio_hold_en((gpio_num_t)PIN_LCD_BL);
+  }
+
+  // ---------------- sleep / wake animations ----------------
+  // Both are deliberately blocking: nothing else needs to run while the device
+  // is on its way down or coming back up, and the sleep one doubles as the
+  // window in which the user lets go of the button.
+
+  // Eyes close, the closed slit narrows to a dot, backlight fades out.
+  void playSleepAnim(uint32_t durMs = SLEEP_ANIM_MS) {
+    const uint32_t t0 = millis();
+    for (;;) {
+      uint32_t t = millis() - t0;
+      if (t >= durMs) break;
+      float p = (float)t / durMs;
+      _frame.fillSprite(COL_BG);
+      // 0.00-0.40 lids come down, 0.40-0.85 the slit shrinks toward the
+      // centre, 0.85-1.00 the dot is gone and only the fade is left.
+      float closing = ease(clamp01(p / 0.40f));
+      float shrink = ease(clamp01((p - 0.40f) / 0.45f));
+      int h = (int)(EYE_H - (EYE_H - 5) * closing);
+      int w = (int)(EYE_W * (1.0f - shrink));
+      if (w > 1 && h > 0) drawEyePair(_frame.height() / 2, w, h);
+      if (p < 0.55f) {
+        _frame.setTextSize(1);
+        _frame.setTextColor(COL_EYE, COL_BG);
+        const char *msg = "going to sleep";
+        _frame.setCursor((_frame.width() - _frame.textWidth(msg)) / 2,
+                         _frame.height() - 14);
+        _frame.print(msg);
+      }
+      _frame.pushSprite(0, 0);
+      // Hold brightness for the first half, then fade the panel out.
+      float dim = clamp01((p - 0.5f) / 0.5f);
+      ledcWrite(PIN_LCD_BL, (int)(LCD_BRIGHTNESS * (1.0f - dim)));
+      delay(FRAME_MS);
+    }
+    off();
+  }
+
+  // Mirror image: backlight comes up, a dot widens into a slit, eyes open with
+  // a small overshoot so it lands with a blink-like snap.
+  void playWakeAnim(uint32_t durMs = WAKE_ANIM_MS) {
+    const uint32_t t0 = millis();
+    for (;;) {
+      uint32_t t = millis() - t0;
+      if (t >= durMs) break;
+      float p = (float)t / durMs;
+      _frame.fillSprite(COL_BG);
+      float grow = ease(clamp01(p / 0.35f));          // dot -> full-width slit
+      float open = ease(clamp01((p - 0.35f) / 0.65f));  // slit -> open eyes
+      int w = max(2, (int)(EYE_W * grow));
+      int h = (int)(5 + (EYE_H - 5) * open);
+      // overshoot: a few percent taller just before settling
+      if (open > 0.75f) h += (int)(6 * sinf((open - 0.75f) / 0.25f * 3.14159f));
+      drawEyePair(_frame.height() / 2, w, h);
+      _frame.pushSprite(0, 0);
+      ledcWrite(PIN_LCD_BL, (int)(LCD_BRIGHTNESS * clamp01(p / 0.25f)));
+      delay(FRAME_MS);
+    }
+    ledcWrite(PIN_LCD_BL, LCD_BRIGHTNESS);
+  }
+
   void render(uint32_t now) {
     _frame.fillSprite(COL_BG);
-    if (app.connected && app.hasData) {
+    // Eyes-only mode (button click): just the eyes, centred, nothing else.
+    if (!app.showData) {
+      drawEyes(now, /*sleeping=*/!(app.connected && app.hasData));
+    } else if (app.connected && app.hasData) {
       if (app.authError) {
         drawDeadEyes(now);
         drawAuthErrorExtras();
@@ -41,7 +133,8 @@ public:
       drawEyes(now, /*sleeping=*/true);
       drawSleepExtras(now);
     }
-    drawCorner();
+    if (app.showData) drawCorner();
+    drawHoldProgress();
     _frame.pushSprite(0, 0);
   }
 
@@ -60,20 +153,41 @@ private:
     _frame.print(buf);
   }
 
+  // While the button is held, a bar fills across the bottom edge; when it
+  // reaches the full width the device goes to sleep.
+  void drawHoldProgress() {
+    if (app.btnHeldMs < 250) return;  // ignore ordinary clicks
+    float r = min(1.0f, (float)app.btnHeldMs / BTN_HOLD_MS);
+    int h = 3, y = _frame.height() - h;
+    _frame.fillRect(0, y, (int)(_frame.width() * r), h, COL_EYE);
+  }
+
+  static float clamp01(float v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+  // smoothstep — no abrupt starts or stops in the animations
+  static float ease(float p) { return p * p * (3.0f - 2.0f * p); }
+
   // ---------------- eyes ----------------
   // Shared eye geometry, also used by the XX (auth error) variant.
   static constexpr int EYE_GAP = 41;   // centre-to-centre / 2
   static constexpr int EYE_W = 29;
   static constexpr int EYE_H = 73;
-  // Stats view: sit midway between the top of the display and the bottom text
-  // row, so the eyes stay optically centred in the space that's left.
-  static constexpr int EYE_CY_STATS = 76;
+
+  // The two eye bars at an arbitrary size, centred on cy — shared by the
+  // idle rendering and both animations.
+  void drawEyePair(int cy, int w, int h) {
+    const int cx = _frame.width() / 2;
+    int r = min(13, min(w, h) / 2);
+    for (int side = -1; side <= 1; side += 2)
+      _frame.fillSmoothRoundRect(cx + side * EYE_GAP - w / 2, cy - h / 2, w, h, r,
+                                 COL_EYE);
+  }
 
   // Two black vertical rounded bars, Claude-style. Blink = height squash.
   void drawEyes(uint32_t now, bool sleeping) {
-    const int cx = _frame.width() / 2;
-    const int cy = sleeping ? _frame.height() / 2 : EYE_CY_STATS;
-    const int gap = EYE_GAP, eyeW = EYE_W, eyeH = EYE_H;
+    // Always dead centre — the stats rows sit clear of the eyes at the very top
+    // and bottom, so toggling them doesn't shift the eyes.
+    const int cy = _frame.height() / 2;
+    const int eyeW = EYE_W, eyeH = EYE_H;
 
     float openness = 1.0f;
     if (sleeping) {
@@ -99,11 +213,7 @@ private:
     }
     int h = max(4, (int)(eyeH * openness));
     int bob = sleeping ? 0 : (int)(2 * sinf(now / 700.0f));
-    for (int side = -1; side <= 1; side += 2) {
-      int x = cx + side * gap - eyeW / 2;
-      int y = cy - h / 2 + bob;
-      _frame.fillSmoothRoundRect(x, y, eyeW, h, min(13, h / 2), COL_EYE);
-    }
+    drawEyePair(cy + bob, eyeW, h);
   }
 
   // XX eyes — shown when the daemon has credentials but they were rejected.

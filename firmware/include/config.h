@@ -10,6 +10,12 @@
 #define PIN_LCD_RST   23  // D5
 #define PIN_LCD_BL    2   // D2
 #define PIN_BATT_ADC  1   // A1 — battery through a 2:1 divider (Vbat = 2 * Vadc)
+// Push button / switch to GND (internal pull-up, so LOW = pressed).
+// D6 = GPIO16. Holding the button suspends the device with *light* sleep, not
+// deep sleep: the C6 can only wake from deep sleep on the low-power IO pads
+// GPIO0-GPIO7 (SOC_RTCIO_PIN_COUNT == 8), while light-sleep GPIO wakeup works
+// on any digital pin — which is what lets the button live on D6.
+#define PIN_BUTTON    16  // D6
 
 // ---------------- display ----------------
 #define LCD_WIDTH   170
@@ -19,6 +25,12 @@
 #define LCD_BRIGHTNESS 222  // backlight PWM duty (0-255); 100%
 
 // ---------------- behaviour ----------------
+#define BTN_DEBOUNCE_MS    25               // mechanical switch settle time
+#define BTN_HOLD_MS        5000             // hold this long -> deep sleep
+// Going-to-sleep animation is long on purpose: it also gives the user time to
+// let go of the button before the low-level wake source is armed.
+#define SLEEP_ANIM_MS      5000
+#define WAKE_ANIM_MS       2000
 #define DATA_STALE_MS      (5 * 60 * 1000)  // no BLE update for 5 min -> stale marker
 #define FRAME_MS           33               // ~30 fps animations
 

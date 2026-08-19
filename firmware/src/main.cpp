@@ -10,9 +10,14 @@
 #endif
 #include "state.h"
 #include "ui.h"
+#include "button.h"
+#include <esp_sleep.h>
+#include <driver/gpio.h>
 
 AppState app;
 static UI ui;
+static Button button;
+
 static String rxBuffer;
 
 // ---------------------------------------------------------------- payload
@@ -121,6 +126,73 @@ static void updateSensors(uint32_t now) {
   }
 }
 
+// ---------------------------------------------------------------- button
+
+// Suspend on a button hold: park the display, drop the radio, then light sleep
+// with the button armed as the wake source.
+//
+// Light sleep rather than deep sleep on purpose — the C6 can only wake from
+// deep sleep on the LP IO pads (GPIO0-GPIO7) and the button is on D6/GPIO16,
+// which light-sleep GPIO wakeup handles on any digital pin.
+//
+// Waking restarts the chip instead of resuming in place. Resuming would mean
+// rebuilding the BLE stack after its deinit, which is fragile; a restart gets
+// us a clean stack, a fresh advertisement and a known-good button state for the
+// price of re-fetching the stats from the daemon. setup() fades in with the wake
+// animation on every boot, so the restart looks like a wake-up either way.
+static void enterLightSleep() {
+  Serial.println("[btn] hold -> light sleep");
+  app.btnHeldMs = 0;      // drop the hold bar for the animation
+  ui.playSleepAnim();     // 5 s eyes-closing fade, ends with the panel dark
+  // The BLE controller holds a power-management lock that would keep the chip
+  // from actually sleeping, so the radio has to go down first.
+  NimBLEDevice::stopAdvertising();
+  NimBLEDevice::deinit(true);
+
+  // Don't sleep while the switch is still closed, or the LOW-level wake source
+  // would fire the instant we go down. The 5 s animation above means this has
+  // normally already happened.
+  button.waitForRelease();
+
+  // Keep the pad on its active config (input + pull-up) through the sleep,
+  // then wake on the button being pulled LOW.
+  gpio_sleep_sel_dis((gpio_num_t)PIN_BUTTON);
+  gpio_wakeup_enable((gpio_num_t)PIN_BUTTON, GPIO_INTR_LOW_LEVEL);
+  esp_sleep_enable_gpio_wakeup();
+  Serial.printf("[btn] sleeping, wake on GPIO%d LOW\n", PIN_BUTTON);
+  Serial.flush();
+
+  // Sleep until the button pulls the pin LOW. Anything else that returns from
+  // light sleep (or a refused sleep) is retried rather than treated as a press,
+  // but never forever — falling through to the restart still lands the device
+  // back in its normal running state.
+  for (int attempt = 0; attempt < 10; attempt++) {
+    esp_err_t err = esp_light_sleep_start();
+    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+    Serial.printf("[btn] light sleep returned %s, cause %d\n",
+                  esp_err_to_name(err), (int)cause);
+    if (err == ESP_OK && cause == ESP_SLEEP_WAKEUP_GPIO) break;
+    delay(100);  // a refused sleep must not spin
+  }
+
+  gpio_wakeup_disable((gpio_num_t)PIN_BUTTON);
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+  Serial.println("[btn] woke -> restart");
+  Serial.flush();
+  esp_restart();  // never returns; setup() plays the wake animation
+}
+
+static void updateButton(uint32_t now) {
+  Button::Event ev = button.update(now);
+  app.btnHeldMs = button.heldMs(now);
+  if (ev == Button::CLICK) {
+    app.showData = !app.showData;
+    Serial.printf("[btn] click -> %s\n", app.showData ? "eyes + data" : "eyes only");
+  } else if (ev == Button::HOLD) {
+    enterLightSleep();
+  }
+}
+
 // ---------------------------------------------------------------- arduino
 
 // The C6's RF switch must be enabled and pointed at an antenna before the
@@ -135,14 +207,20 @@ static void antennaBegin() {
 void setup() {
   Serial.begin(115200);
   Serial.println("[boot] ClaudeObserver starting");
+  button.begin();
   antennaBegin();
   analogSetPinAttenuation(PIN_BATT_ADC, ADC_11db);  // full-scale ~3.1 V at the pin
-  ui.begin();
+  // Every boot fades in the same way, whether it is a cold start or the restart
+  // that ends a light sleep.
+  ui.begin(/*dark=*/true);   // start dark so the wake animation can fade in
+  ui.playWakeAnim();         // 2 s eyes-opening fade
+  button.waitForRelease();   // a wake press must not also count as a click
   bleBegin();
 }
 
 void loop() {
   uint32_t now = millis();
+  updateButton(now);
   updateSensors(now);
   ui.render(now);
   static uint32_t last = 0;
