@@ -7,19 +7,35 @@
 //
 // Debounce: the raw level has to stay put for BTN_DEBOUNCE_MS before it counts
 // as a real edge, which swallows the contact chatter of a mechanical switch.
-// A press that is released before BTN_HOLD_MS is a click; crossing BTN_HOLD_MS
-// while still down fires the hold event once (the later release is ignored).
+// The debounced down edge reports PRESS immediately — for anything that has to
+// feel responsive rather than wait for the release. A short press then also
+// reports a click on release; crossing the hold threshold while still down
+// fires the hold event once (the later release is ignored). A press released inside
+// [_secretMs, _holdMs) reports SECRET instead of CLICK — the hidden gesture.
+// Both thresholds are settable so the minigame can use its own (shorter hold to
+// quit, no secret window).
 class Button {
   bool _raw = false;        // last sampled level (true = pressed)
   bool _stable = false;     // debounced level
   uint32_t _changedAt = 0;  // when _raw last flipped
   uint32_t _pressedAt = 0;  // when _stable went down
   bool _holdFired = false;
+  uint32_t _holdMs = BTN_HOLD_MS;
+  uint32_t _secretMs = BTN_SECRET_MS;
 
 public:
-  enum Event { NONE, CLICK, HOLD };
+  enum Event { NONE, PRESS, CLICK, HOLD, SECRET };
 
   void begin() { pinMode(PIN_BUTTON, INPUT_PULLUP); }
+
+  // holdMs = how long a hold has to last to fire HOLD; secretMs = start of the
+  // release window that reports SECRET (pass holdMs to disable it).
+  void setThresholds(uint32_t holdMs, uint32_t secretMs) {
+    _holdMs = holdMs;
+    _secretMs = secretMs;
+  }
+
+  uint32_t holdMs() const { return _holdMs; }
 
   bool isDown() const { return _stable; }
 
@@ -38,11 +54,13 @@ public:
       if (_stable) {
         _pressedAt = now;
         _holdFired = false;
+        return PRESS;  // down edge, before we know click vs hold vs secret
       } else if (!_holdFired) {
-        return CLICK;  // released before the hold threshold
+        // released before the hold threshold: late release = secret gesture
+        return (now - _pressedAt >= _secretMs) ? SECRET : CLICK;
       }
     }
-    if (_stable && !_holdFired && now - _pressedAt >= BTN_HOLD_MS) {
+    if (_stable && !_holdFired && now - _pressedAt >= _holdMs) {
       _holdFired = true;
       return HOLD;
     }

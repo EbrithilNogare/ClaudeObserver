@@ -26,6 +26,7 @@ struct AppState {
   uint8_t battPct = 0;                    // 0-100 %, mapped over 3.3-4.1 V
   bool showData = true;                   // false = eyes-only view (button click)
   uint32_t btnHeldMs = 0;                 // >0 while the button is held down
+  bool gameActive = false;                // hidden dyno minigame owns the screen
   Stats stats;
 };
 

@@ -116,6 +116,11 @@ public:
     ledcWrite(PIN_LCD_BL, LCD_BRIGHTNESS);
   }
 
+  // The minigame borrows the same full-frame sprite: it draws into frame() and
+  // then calls push(), so nothing else in the UI has to know about it.
+  LGFX_Sprite &frame() { return _frame; }
+  void push() { _frame.pushSprite(0, 0); }
+
   void render(uint32_t now) {
     _frame.fillSprite(COL_BG);
     // Eyes-only mode (button click): just the eyes, centred, nothing else.

@@ -11,12 +11,14 @@
 #include "state.h"
 #include "ui.h"
 #include "button.h"
+#include "game.h"
 #include <esp_sleep.h>
 #include <driver/gpio.h>
 
 AppState app;
 static UI ui;
 static Button button;
+static Game game;
 
 static String rxBuffer;
 
@@ -182,12 +184,42 @@ static void enterLightSleep() {
   esp_restart();  // never returns; setup() plays the wake animation
 }
 
+// ---------------------------------------------------------------- minigame
+
+// The hidden runner takes over the screen; the button switches to the game
+// thresholds (3 s down quits, no secret window) and the BLE stack keeps running
+// untouched in the background, so the stats are fresh again on the way out.
+static void enterGame(uint32_t now) {
+  Serial.println("[game] secret hold -> dyno minigame");
+  app.gameActive = true;
+  game.reset(now);
+  button.setThresholds(GAME_EXIT_HOLD_MS, GAME_EXIT_HOLD_MS);
+}
+
+static void exitGame() {
+  Serial.printf("[game] hold -> exit (highscore %u)\n", game.highscore());
+  app.gameActive = false;
+  button.setThresholds(BTN_HOLD_MS, BTN_SECRET_MS);
+  button.waitForRelease();  // the exit hold must not also click the watch face
+  app.btnHeldMs = 0;
+}
+
 static void updateButton(uint32_t now) {
   Button::Event ev = button.update(now);
   app.btnHeldMs = button.heldMs(now);
+  if (app.gameActive) {
+    // Jump on the down edge, not the release — waiting for the release costs a
+    // whole reaction time and the jump feels late. The release itself (CLICK)
+    // is therefore ignored, or every tap would jump twice.
+    if (ev == Button::PRESS) game.press(now);
+    else if (ev == Button::HOLD) exitGame();
+    return;
+  }
   if (ev == Button::CLICK) {
     app.showData = !app.showData;
     Serial.printf("[btn] click -> %s\n", app.showData ? "eyes + data" : "eyes only");
+  } else if (ev == Button::SECRET) {
+    enterGame(now);
   } else if (ev == Button::HOLD) {
     enterLightSleep();
   }
@@ -213,6 +245,7 @@ void setup() {
   // Every boot fades in the same way, whether it is a cold start or the restart
   // that ends a light sleep.
   ui.begin(/*dark=*/true);   // start dark so the wake animation can fade in
+  game.begin();              // load the minigame highscore from flash
   ui.playWakeAnim();         // 2 s eyes-opening fade
   button.waitForRelease();   // a wake press must not also count as a click
   bleBegin();
@@ -222,7 +255,16 @@ void loop() {
   uint32_t now = millis();
   updateButton(now);
   updateSensors(now);
-  ui.render(now);
+  if (app.gameActive) {
+    static uint32_t lastGame = 0;
+    if (!lastGame) lastGame = now;
+    game.update(now, now - lastGame);
+    lastGame = now;
+    game.draw(ui.frame(), now);
+    ui.push();
+  } else {
+    ui.render(now);
+  }
   static uint32_t last = 0;
   if (now - last < FRAME_MS) delay(FRAME_MS - (now - last));
   last = millis();

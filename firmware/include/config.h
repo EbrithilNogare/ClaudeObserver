@@ -27,6 +27,14 @@
 // ---------------- behaviour ----------------
 #define BTN_DEBOUNCE_MS    25               // mechanical switch settle time
 #define BTN_HOLD_MS        5000             // hold this long -> deep sleep
+// Secret gesture: a hold *released* inside [BTN_SECRET_MS, BTN_HOLD_MS) starts
+// the hidden dyno minigame instead of counting as a click. Cross BTN_HOLD_MS
+// while still down and it is still a sleep, so the gesture stays hidden behind
+// "almost slept the device".
+#define BTN_SECRET_MS      4000
+// While the minigame runs the hold threshold shrinks: 3 s down quits the game
+// and returns to the normal watch face (it does not sleep).
+#define GAME_EXIT_HOLD_MS  3000
 // Going-to-sleep animation is long on purpose: it also gives the user time to
 // let go of the button before the low-level wake source is armed.
 #define SLEEP_ANIM_MS      5000
@@ -61,3 +69,31 @@
 #define COL_GOOD      0x2E8B   // green-ish
 #define COL_WARN      0xFDA0   // amber
 #define COL_BAD       0xF986   // red-ish
+
+// ---------------- minigame (hidden dyno-style runner) ----------------
+// Very dark orange ground/sky, Claudie in the normal case orange, obstacles
+// mostly white with an orange cap.
+#define COL_GAME_BG     0x30A0   // #331400 very dark orange
+#define COL_GAME_CLOUD  0x5920   // #5A2400 slightly lighter, background props
+#define COL_GAME_GROUND 0x6180   // #663000 ground line
+#define COL_GAME_CLAUDE COL_BG   // Claudie = the normal case orange
+#define COL_GAME_OBST   0xFFFF   // obstacle body (80 %)
+#define COL_GAME_OBST_A COL_BG   // obstacle cap (20 %)
+#define COL_GAME_TEXT   0xFFFF
+
+#define GAME_GRAVITY     900.0f  // px/s^2
+// Jump apex is v^2/2g, so +20 % height means v * sqrt(1.2) — clears ~73 px,
+// well over the 27 px tallest cactus.
+#define GAME_JUMP_V      362.0f  // px/s upward impulse
+#define GAME_SPEED_MIN   132.0f  // px/s scroll at the start
+#define GAME_SPEED_MAX   312.0f  // px/s cap
+#define GAME_SPEED_RAMP  0.42f   // px/s added per point scored
+// Spacing between obstacles: a fixed floor, a random spread, and a term that
+// grows with the scroll speed so the reaction window doesn't shrink as the run
+// gets faster.
+#define GAME_GAP_MIN     117.0f  // px
+#define GAME_GAP_RAND    143     // px of extra random gap
+#define GAME_GAP_SPEED   0.585f  // px of gap per px/s of speed
+#define GAME_PIX         3       // screen pixels per pixel-art (mascot grid) cell
+#define GAME_MAX_OBST    4
+#define GAME_NVS_NS      "dyno"  // flash namespace for the highscore
