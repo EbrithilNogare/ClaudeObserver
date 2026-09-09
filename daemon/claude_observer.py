@@ -133,7 +133,7 @@ def _fetch_cookie_extra(cfg: dict) -> tuple:
                 raise
         return data.get("extra_usage"), False
     except Exception as exc:  # noqa: BLE001
-        log.debug("claude.ai usage endpoint unavailable: %s", exc)
+        log.warning("claude.ai usage fetch failed (%s): %s", type(exc).__name__, exc)
         return None, False
 
 
@@ -192,14 +192,35 @@ def _record_day(used: float) -> float:
     return max(0.0, used - base)
 
 
-def collect(cfg: dict) -> dict:
-    """Payload for the display: month [used, limit], day [used, budget]."""
-    usage, auth_error = fetch_usage(cfg)
+def collect(cfg: dict, attempts: int = 1) -> dict | None:
+    """Payload for the display (month [used, limit], day [used, budget]), or None.
+
+    None means "nothing truthful to say". A failed fetch must never be dressed
+    up as a reading: the monthly_budget_usd fallback with zero spend is
+    indistinguishable from real data to the firmware, so it overwrites good
+    values and resets the staleness timer that would otherwise have owned up to
+    it. The caller skips the push instead, leaving the last known numbers on
+    screen until `data stale...` takes over.
+
+    `attempts` retries a fetch that failed for no stated reason, which is what
+    a wake-from-sleep looks like — the interval fires before the network is up.
+    """
+    usage, auth_error = None, False
+    for attempt in range(max(attempts, 1)):
+        usage, auth_error = fetch_usage(cfg)
+        if usage or auth_error:
+            break
+        if attempt + 1 < attempts:
+            delay = 2 * (attempt + 1)
+            log.info("usage fetch came back empty, retrying in %ds", delay)
+            time.sleep(delay)
+
     if not usage:
-        snap = {"mb": [0.0, float(cfg["monthly_budget_usd"])], "db": [0.0, 0.0]}
-        if auth_error:
-            snap["ae"] = 1  # credentials present but rejected
-        return snap
+        if not auth_error:
+            return None
+        # Credentials present but rejected is itself a fact worth showing: the
+        # display draws XX eyes and the daemon asks for a new key.
+        return {"mb": [0.0, float(cfg["monthly_budget_usd"])], "db": [0.0, 0.0], "ae": 1}
 
     month_used, month_limit = usage
     day_used = _record_day(month_used)
@@ -356,23 +377,37 @@ async def push_loop(cfg: dict):
                 device, disconnected_callback=lambda _c: dropped.set()
             ) as client:
                 log.info("connected, streaming updates")
+                first_fetch = True
                 while client.is_connected and not dropped.is_set():
-                    stats = await asyncio.to_thread(collect, cfg)
-                    payload = (json.dumps(stats, separators=(",", ":")) + "\n").encode()
-                    log.info("sending %d bytes: %s", len(payload), payload[:120])
-                    for i in range(0, len(payload), CHUNK):
-                        await asyncio.wait_for(
-                            client.write_gatt_char(
-                                cfg["ble_char_uuid"], payload[i : i + CHUNK], response=True
-                            ),
-                            timeout=10,
+                    # A reconnect usually means the Mac just woke, so give the
+                    # first fetch a few tries before giving up on this round.
+                    stats = await asyncio.to_thread(
+                        collect, cfg, 4 if first_fetch else 1
+                    )
+                    first_fetch = False
+                    if stats is None:
+                        log.warning(
+                            "no usage data this round — skipping push, "
+                            "display keeps its last values"
                         )
-                    if stats.get("ae"):  # XX eyes on the display + ask for a new key
-                        task = asyncio.create_task(handle_auth_error())
-                        task.add_done_callback(
-                            lambda t: log.error("auth-prompt task crashed: %s", t.exception())
-                            if not t.cancelled() and t.exception() else None
-                        )
+                    else:
+                        payload = (
+                            json.dumps(stats, separators=(",", ":")) + "\n"
+                        ).encode()
+                        log.info("sending %d bytes: %s", len(payload), payload[:120])
+                        for i in range(0, len(payload), CHUNK):
+                            await asyncio.wait_for(
+                                client.write_gatt_char(
+                                    cfg["ble_char_uuid"], payload[i : i + CHUNK], response=True
+                                ),
+                                timeout=10,
+                            )
+                        if stats.get("ae"):  # XX eyes on the display + ask for a new key
+                            task = asyncio.create_task(handle_auth_error())
+                            task.add_done_callback(
+                                lambda t: log.error("auth-prompt task crashed: %s", t.exception())
+                                if not t.cancelled() and t.exception() else None
+                            )
                     # Sleep the interval, but wake immediately if the device drops.
                     try:
                         await asyncio.wait_for(dropped.wait(), timeout=interval)
@@ -387,7 +422,10 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config()
     if "--once" in sys.argv:  # debug: print stats and exit, no BLE
-        stats = collect(cfg)
+        stats = collect(cfg, attempts=3)
+        if stats is None:
+            print("no usage data — nothing would be pushed")
+            return
         print(json.dumps(stats, indent=2))
         if stats.get("ae"):
             _prompt_new_session_key(cfg)
