@@ -63,6 +63,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *, NimBLEConnInfo &connInfo) override {
     app.connected = true;
     app.connHandle = connInfo.getConnHandle();
+    app.lastRxMs = millis();
     Serial.println("[ble] mac connected");
   }
   void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int reason) override {
@@ -76,6 +77,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
 class DataCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *chr, NimBLEConnInfo &) override {
+    app.lastRxMs = millis();
     std::string chunk = chr->getValue();
     rxBuffer += String(chunk.c_str(), chunk.length());
     int nl;
@@ -103,6 +105,16 @@ static void bleBegin() {
   adv->enableScanResponse(true);
   adv->start();
   Serial.println("[ble] advertising as " BLE_DEVICE_NAME);
+}
+
+// Drop a connection that has gone quiet (see LINK_IDLE_KICK_MS); onDisconnect
+// then restarts advertising and the daemon reconnects on its next scan.
+static void checkLinkIdle(uint32_t now) {
+  if (!app.connected || app.connHandle == 0xFFFF) return;
+  if (now - app.lastRxMs < LINK_IDLE_KICK_MS) return;
+  Serial.println("[ble] link idle too long, disconnecting");
+  app.lastRxMs = now;  // one kick per idle window, in case the disconnect lags
+  NimBLEDevice::getServer()->disconnect(app.connHandle);
 }
 
 // ---------------------------------------------------------------- sensors
@@ -183,7 +195,7 @@ static void enterLightSleep() {
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
   Serial.println("[btn] woke -> restart");
   Serial.flush();
-  esp_restart();  // never returns; setup() plays the wake animation
+  esp_restart();  // never returns; setup() plays the boot fade
 }
 
 // ---------------------------------------------------------------- screens
@@ -292,11 +304,12 @@ void setup() {
   antennaBegin();
   analogSetPinAttenuation(PIN_BATT_ADC, ADC_11db);  // full-scale ~3.1 V at the pin
   // Every boot fades in the same way, whether it is a cold start or the restart
-  // that ends a light sleep.
-  ui.begin(/*dark=*/true);   // start dark so the wake animation can fade in
+  // that ends a light sleep: the sleeping face brightens, and the eyes only
+  // open once BLE data arrives (UI::drawEyes).
+  ui.begin(/*dark=*/true);   // start dark so the boot fade can bring it up
   game.begin();              // load the minigame highscores from flash
   jump.begin();
-  ui.playWakeAnim();         // 2 s eyes-opening fade
+  ui.playBootFade();         // 2 s backlight fade-in, eyes still closed
   button.waitForRelease();   // a wake press must not also count as a click
   bleBegin();
 }
@@ -305,6 +318,7 @@ void loop() {
   uint32_t now = millis();
   updateButton(now);
   updateSensors(now);
+  checkLinkIdle(now);
   switch (app.screen) {
     case Screen::Game: {
       static uint32_t lastGame = 0;

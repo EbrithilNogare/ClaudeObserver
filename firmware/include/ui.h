@@ -12,10 +12,13 @@ class UI {
   uint32_t _nextBlinkAt = 2000;
   uint32_t _blinkStart = 0;
   bool _blinking = false;
+  bool _eyesShut = true;       // last drawEyes() frame was the sleeping face
+  uint32_t _openStart = 0;     // eye-opening animation start, 0 = not running
+  float _openFrom = 0;         // sleeping openness the animation starts from
 
 public:
   // dark=true leaves the backlight off so the caller can fade in with
-  // playWakeAnim() instead of flashing a full-brightness frame first.
+  // playBootFade() instead of flashing a full-brightness frame first.
   void begin(bool dark = false) {
     // off() latches the backlight pin LOW with a pad hold, and that hold
     // outlives the restart that ends a light sleep — release it before the PWM
@@ -57,7 +60,7 @@ public:
     gpio_hold_en((gpio_num_t)PIN_LCD_BL);
   }
 
-  // ---------------- sleep / wake animations ----------------
+  // ---------------- sleep animation / boot fade ----------------
   // Both are deliberately blocking: nothing else needs to run while the device
   // is on its way down or coming back up, and the sleep one doubles as the
   // window in which the user lets go of the button.
@@ -94,24 +97,16 @@ public:
     off();
   }
 
-  // Mirror image: backlight comes up, a dot widens into a slit, eyes open with
-  // a small overshoot so it lands with a blink-like snap.
-  void playWakeAnim(uint32_t durMs = WAKE_ANIM_MS) {
+  // Power-on: the backlight slowly comes up over the ordinary sleeping face
+  // (closed eyes, z Z z). The eyes stay shut until the daemon actually connects
+  // and sends data — then drawEyes() plays the slow eye-opening on its own.
+  void playBootFade(uint32_t durMs = WAKE_ANIM_MS) {
     const uint32_t t0 = millis();
     for (;;) {
       uint32_t t = millis() - t0;
       if (t >= durMs) break;
-      float p = (float)t / durMs;
-      _frame.fillSprite(COL_BG);
-      float grow = ease(clamp01(p / 0.35f));          // dot -> full-width slit
-      float open = ease(clamp01((p - 0.35f) / 0.65f));  // slit -> open eyes
-      int w = max(2, (int)(EYE_W * grow));
-      int h = (int)(5 + (EYE_H - 5) * open);
-      // overshoot: a few percent taller just before settling
-      if (open > 0.75f) h += (int)(6 * sinf((open - 0.75f) / 0.25f * 3.14159f));
-      drawEyePair(_frame.height() / 2, w, h);
-      _frame.pushSprite(0, 0);
-      ledcWrite(PIN_LCD_BL, (int)(LCD_BRIGHTNESS * clamp01(p / 0.25f)));
+      render(millis());
+      ledcWrite(PIN_LCD_BL, (int)(LCD_BRIGHTNESS * ease((float)t / durMs)));
       delay(FRAME_MS);
     }
     ledcWrite(PIN_LCD_BL, LCD_BRIGHTNESS);
@@ -288,6 +283,22 @@ private:
     if (sleeping) {
       // closed, gentle breathing wobble
       openness = 0.08f + 0.03f * sinf(now / 900.0f);
+      _openStart = 0;
+    } else if (_eyesShut || _openStart) {
+      // Just woke up (BLE data arrived): open slowly from wherever the
+      // breathing left the lids, with a small overshoot before settling.
+      if (_eyesShut) {
+        _openStart = now ? now : 1;
+        _openFrom = 0.08f + 0.03f * sinf(now / 900.0f);
+      }
+      float p = clamp01((float)(now - _openStart) / EYE_OPEN_MS);
+      float e = ease(p);
+      openness = _openFrom + (1.0f - _openFrom) * e;
+      if (p > 0.8f) openness += 0.06f * sinf((p - 0.8f) / 0.2f * 3.14159f);
+      if (p >= 1.0f) {
+        _openStart = 0;
+        _nextBlinkAt = now + 1200;  // a first blink shortly after, like waking
+      }
     } else {
       if (!_blinking && now >= _nextBlinkAt) {
         _blinking = true;
@@ -306,6 +317,7 @@ private:
       }
       // subtle idle bob
     }
+    _eyesShut = sleeping;
     int h = max(4, (int)(eyeH * openness));
     int bob = sleeping ? 0 : (int)(2 * sinf(now / 700.0f));
     drawEyePair(cy + bob, eyeW, h);

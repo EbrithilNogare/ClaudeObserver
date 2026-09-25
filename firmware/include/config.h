@@ -37,8 +37,14 @@
 // Going-to-sleep animation is long on purpose: it also gives the user time to
 // let go of the button before the low-level wake source is armed.
 #define SLEEP_ANIM_MS      5000
-#define WAKE_ANIM_MS       2000
+#define WAKE_ANIM_MS       2000             // power-on backlight fade-in
+#define EYE_OPEN_MS        1800             // eyes opening once BLE data arrives
 #define DATA_STALE_MS      (5 * 60 * 1000)  // no BLE update for 5 min -> stale marker
+// A link that carries no writes for this long is dropped from our side. macOS
+// can keep a zombie connection up after the daemon has given up on it; while it
+// lasts we don't advertise, so the daemon can never find us again. The daemon
+// writes every ~30 s, so this only fires on a dead link.
+#define LINK_IDLE_KICK_MS  (3 * 60 * 1000)
 #define FRAME_MS           33               // ~30 fps animations
 
 // Battery: LiPo read on A1 through a 2:1 resistor divider.

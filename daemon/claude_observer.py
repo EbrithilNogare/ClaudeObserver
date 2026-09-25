@@ -329,6 +329,15 @@ def _prompt_new_session_key(cfg: dict) -> bool:
 
 CHUNK = 180  # bytes per GATT write; payload terminated by '\n'
 
+# How long the display may stay invisible after we last talked to it before the
+# daemon exits so launchd restarts it. A connected peripheral stops advertising,
+# and CoreBluetooth sometimes keeps the link up at the OS level after bleak has
+# reported it dropped: the ESP still thinks it is connected (so never
+# advertises), and our scans never see it again. The link belongs to this
+# process, so exiting is what releases it; the fresh process then finds the
+# display within seconds.
+LOST_RESTART_S = 120
+
 
 async def find_device(cfg: dict):
     from bleak import BleakScanner
@@ -362,9 +371,17 @@ async def push_loop(cfg: dict):
         finally:
             prompting = False
 
+    last_seen = None  # monotonic time of the last connection to the display
     while True:
         device = await find_device(cfg)
         if device is None:
+            if last_seen is not None and time.monotonic() - last_seen > LOST_RESTART_S:
+                log.warning(
+                    "display unseen for %ds after a drop — exiting so launchd "
+                    "restarts us and the OS releases the stale BLE link",
+                    LOST_RESTART_S,
+                )
+                sys.exit(1)
             log.info("display not found, rescanning...")
             await asyncio.sleep(3)
             continue
@@ -378,6 +395,7 @@ async def push_loop(cfg: dict):
                 device, disconnected_callback=lambda _c: dropped.set()
             ) as client:
                 log.info("connected, streaming updates")
+                last_seen = time.monotonic()
                 first_fetch = True
                 while client.is_connected and not dropped.is_set():
                     # A reconnect usually means the Mac just woke, so give the
@@ -409,11 +427,13 @@ async def push_loop(cfg: dict):
                                 lambda t: log.error("auth-prompt task crashed: %s", t.exception())
                                 if not t.cancelled() and t.exception() else None
                             )
+                    last_seen = time.monotonic()
                     # Sleep the interval, but wake immediately if the device drops.
                     try:
                         await asyncio.wait_for(dropped.wait(), timeout=interval)
                     except asyncio.TimeoutError:
                         pass
+                log.warning("BLE link dropped, reconnecting")
         except Exception as exc:  # noqa: BLE001 — keep daemon alive on any BLE hiccup
             log.warning("BLE connection lost: %s", exc)
         await asyncio.sleep(2)

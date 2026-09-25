@@ -25,6 +25,7 @@ struct AppState {
   volatile bool hasData = false;
   volatile bool authError = false;         // daemon: creds present but rejected
   uint32_t lastUpdateMs = 0;
+  volatile uint32_t lastRxMs = 0;          // last write or connect on the BLE link
   volatile uint16_t connHandle = 0xFFFF;  // BLE_HS_CONN_HANDLE_NONE
   int8_t rssi = 0;                        // BLE signal strength (dBm), <0
   float espTempC = 0;                     // ESP32 internal temperature
