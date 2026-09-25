@@ -105,9 +105,22 @@ inline const char *const CLOUD[] = {
     "..####..",
 };
 
+// Blit a '#'-mask bitmap, one source pixel to a scale x scale block. Rows
+// above capRows use capCol — that is how the obstacles get their orange top
+// fifth without a second bitmap.
+inline void blit(LGFX_Sprite &f, int x, int y, const char *const *rows, int h,
+                 uint16_t col, int scale = GAME_PIX, int capRows = 0,
+                 uint16_t capCol = 0) {
+  for (int r = 0; r < h; r++)
+    for (int c = 0; rows[r][c]; c++)
+      if (rows[r][c] == '#')
+        f.fillRect(x + c * scale, y + r * scale, scale, scale,
+                   r < capRows ? capCol : col);
+}
+
 }  // namespace art
 
-// Hidden dyno-style runner: Claudie runs right-to-left past obstacles and the
+// Dyno-style runner (picked from the menu): Claudie runs right-to-left past obstacles and the
 // only control is jump (the same switch that runs the rest of the device).
 //
 // The game draws into the UI's full-frame sprite — it never touches the panel
@@ -127,7 +140,7 @@ public:
   void reset(uint32_t now) {
     _phase = READY;
     _score = 0;
-    _speed = GAME_SPEED_MIN;
+    _speed = pace(0).speed;
     _scroll = 0;
     _y = 0;
     _vy = 0;
@@ -169,7 +182,8 @@ public:
     _cloudScroll += dt * 12.0f;
     if (_phase != RUN) return;
 
-    _speed = min(GAME_SPEED_MAX, GAME_SPEED_MIN + _score * GAME_SPEED_RAMP);
+    Pace pc = pace(_score);
+    _speed = pc.speed;
     _scroll += _speed * dt;
 
     // jump arc
@@ -194,11 +208,9 @@ public:
     }
     if (_scroll >= _nextSpawnX) {
       spawn();
-      // Grows with speed, so a faster run never squeezes the gap below what one
-      // jump arc can clear.
-      float gap = GAME_GAP_MIN + (esp_random() % GAME_GAP_RAND) +
-                  _speed * GAME_GAP_SPEED;
-      _nextSpawnX = _scroll + gap;
+      // The gap is a time, turned into scroll distance at the current speed.
+      float gapS = pc.gapMin + pc.gapRand * (esp_random() % 1000) / 1000.0f;
+      _nextSpawnX = _scroll + gapS * _speed;
     }
 
     if (hits()) {
@@ -248,12 +260,28 @@ private:
   float _y = 0, _vy = 0;      // height above ground / vertical speed
   float _scroll = 0;          // total distance travelled, px
   float _nextSpawnX = 0;
-  float _speed = GAME_SPEED_MIN;
+  float _speed = 0;
   float _cloudScroll = 0;
   uint16_t _score = 0, _high = 0;
   uint32_t _startedAt = 0, _jumpedAt = 0, _landedAt = 0, _diedAt = 0;
 
   // ---------------- simulation helpers ----------------
+
+  // Speed and obstacle spacing for a score, interpolated from GAME_PACE.
+  struct Pace {
+    float speed, gapMin, gapRand;
+  };
+  static Pace pace(uint16_t score) {
+    static const float K[][4] = GAME_PACE;
+    const int n = sizeof K / sizeof K[0];
+    for (int i = 1; i < n; i++) {
+      if (score >= K[i][0]) continue;
+      float t = max(0.0f, (score - K[i - 1][0]) / (K[i][0] - K[i - 1][0]));
+      auto lerp = [&](int c) { return K[i - 1][c] + (K[i][c] - K[i - 1][c]) * t; };
+      return {lerp(1), lerp(2), lerp(3)};
+    }
+    return {K[n - 1][1], K[n - 1][2], K[n - 1][3]};
+  }
 
   // Every Claudie pose shares the mascot's 12-cell width and stands 8 cells
   // tall, so nothing has to be re-centred between frames.
@@ -299,19 +327,6 @@ private:
 
   // ---------------- drawing ----------------
 
-  // Blit a '#'-mask bitmap, one source pixel to a GAME_PIX square block. Rows
-  // above capRows use capCol — that is how the obstacles get their orange top
-  // fifth without a second bitmap.
-  static void blit(LGFX_Sprite &f, int x, int y, const char *const *rows, int h,
-                   uint16_t col, int scale = GAME_PIX, int capRows = 0,
-                   uint16_t capCol = 0) {
-    for (int r = 0; r < h; r++)
-      for (int c = 0; rows[r][c]; c++)
-        if (rows[r][c] == '#')
-          f.fillRect(x + c * scale, y + r * scale, scale, scale,
-                     r < capRows ? capCol : col);
-  }
-
   static void center(LGFX_Sprite &f, int y, const char *s, float size) {
     f.setTextSize(size);
     f.setTextColor(COL_GAME_TEXT, COL_GAME_BG);
@@ -326,7 +341,7 @@ private:
     for (auto &c : cloud) {
       int x = (int)(c[0] - fmodf(_cloudScroll, (float)span));
       if (x < -80) x += span;
-      blit(f, x, c[1], art::CLOUD, 4, COL_GAME_CLOUD, c[2]);
+      art::blit(f, x, c[1], art::CLOUD, 4, COL_GAME_CLOUD, c[2]);
     }
   }
 
@@ -360,7 +375,7 @@ private:
   void drawObstacle(LGFX_Sprite &f, int x, int groundY, uint8_t kind) {
     ObstArt a = obstArt(kind);
     int cap = max(1, a.rows_n / 5);  // the orange 20 %
-    blit(f, x, groundY - a.rows_n * GAME_PIX, a.rows, a.rows_n, COL_GAME_OBST,
+    art::blit(f, x, groundY - a.rows_n * GAME_PIX, a.rows, a.rows_n, COL_GAME_OBST,
          GAME_PIX, cap, COL_GAME_OBST_A);
   }
 
@@ -401,15 +416,15 @@ private:
     // Every pose is 12 cells wide, so the only placement is standing the feet
     // on the ground.
     int by = baseY - (bodyRows + legRows) * P + bob;
-    if (legs) blit(f, x, by + bodyRows * P, legs, legRows, COL_GAME_CLAUDE);
-    blit(f, x, by, body, bodyRows, COL_GAME_CLAUDE);
+    if (legs) art::blit(f, x, by + bodyRows * P, legs, legRows, COL_GAME_CLAUDE);
+    art::blit(f, x, by, body, bodyRows, COL_GAME_CLAUDE);
 
     // Square eyes, one cell in from each side of the body, on the second row.
     const int eyeRow = 1;
     if (dead) {
       // Drawn at 1:1 pixels, centred on where each square eye sits.
-      blit(f, x + 3 * P, by + eyeRow * P, art::XEYE, 3, COL_EYE, 1);
-      blit(f, x + 8 * P, by + eyeRow * P, art::XEYE, 3, COL_EYE, 1);
+      art::blit(f, x + 3 * P, by + eyeRow * P, art::XEYE, 3, COL_EYE, 1);
+      art::blit(f, x + 8 * P, by + eyeRow * P, art::XEYE, 3, COL_EYE, 1);
       return;
     }
     int eyeH = airborne ? 2 : 1;  // wide eyed in the air

@@ -11,7 +11,7 @@
 #define PIN_LCD_BL    2   // D2
 #define PIN_BATT_ADC  1   // A1 — battery through a 2:1 divider (Vbat = 2 * Vadc)
 // Push button / switch to GND (internal pull-up, so LOW = pressed).
-// D6 = GPIO16. Holding the button suspends the device with *light* sleep, not
+// D6 = GPIO16. The menu's power item suspends the device with *light* sleep, not
 // deep sleep: the C6 can only wake from deep sleep on the low-power IO pads
 // GPIO0-GPIO7 (SOC_RTCIO_PIN_COUNT == 8), while light-sleep GPIO wakeup works
 // on any digital pin — which is what lets the button live on D6.
@@ -26,14 +26,13 @@
 
 // ---------------- behaviour ----------------
 #define BTN_DEBOUNCE_MS    25               // mechanical switch settle time
-#define BTN_HOLD_MS        5000             // hold this long -> deep sleep
-// Secret gesture: a hold *released* inside [BTN_SECRET_MS, BTN_HOLD_MS) starts
-// the hidden dyno minigame instead of counting as a click. Cross BTN_HOLD_MS
-// while still down and it is still a sleep, so the gesture stays hidden behind
-// "almost slept the device".
-#define BTN_SECRET_MS      4000
-// While the minigame runs the hold threshold shrinks: 3 s down quits the game
-// and returns to the normal watch face (it does not sleep).
+// Watch face: click toggles the stats, holding this long opens the menu.
+#define BTN_MENU_HOLD_MS   3000
+// Menu: click steps to the next item (wrapping), holding this long picks it.
+#define MENU_SELECT_HOLD_MS 2000
+// An untouched menu falls back to the watch face after this long.
+#define MENU_IDLE_MS       15000
+// While the minigame runs, 3 s down quits it and returns to the watch face.
 #define GAME_EXIT_HOLD_MS  3000
 // Going-to-sleep animation is long on purpose: it also gives the user time to
 // let go of the button before the low-level wake source is armed.
@@ -70,7 +69,7 @@
 #define COL_WARN      0xFDA0   // amber
 #define COL_BAD       0xF986   // red-ish
 
-// ---------------- minigame (hidden dyno-style runner) ----------------
+// ---------------- minigame (dyno-style runner, launched from the menu) ----------------
 // Very dark orange ground/sky, Claudie in the normal case orange, obstacles
 // mostly white with an orange cap.
 #define COL_GAME_BG     0x30A0   // #331400 very dark orange
@@ -85,15 +84,51 @@
 // Jump apex is v^2/2g, so +20 % height means v * sqrt(1.2) — clears ~73 px,
 // well over the 27 px tallest cactus.
 #define GAME_JUMP_V      362.0f  // px/s upward impulse
-#define GAME_SPEED_MIN   132.0f  // px/s scroll at the start
-#define GAME_SPEED_MAX   312.0f  // px/s cap
-#define GAME_SPEED_RAMP  0.42f   // px/s added per point scored
-// Spacing between obstacles: a fixed floor, a random spread, and a term that
-// grows with the scroll speed so the reaction window doesn't shrink as the run
-// gets faster.
-#define GAME_GAP_MIN     117.0f  // px
-#define GAME_GAP_RAND    143     // px of extra random gap
-#define GAME_GAP_SPEED   0.585f  // px of gap per px/s of speed
+// Difficulty curve: keyframes of {score, scroll speed px/s, min gap s, random
+// extra gap s}, linearly interpolated and held after the last one. Gaps are in
+// seconds, not pixels, so the rhythm stays readable as the speed climbs.
+// Tuned against the old linear ramp: 20 % harder at the start, 50 % harder at
+// 1000 points (split evenly between speed and density), and still hardening
+// up to 2000. For reference, a perfect player can clear two cacti ~0.22 s apart
+// at 420 px/s, so the tightest gap here (0.62 s) always leaves a real window.
+#define GAME_PACE { \
+    {   0, 156, 1.20f, 0.84f}, \
+    { 200, 260, 0.93f, 0.49f}, \
+    { 431, 387, 0.78f, 0.33f}, \
+    {1000, 411, 0.73f, 0.32f}, \
+    {2000, 440, 0.62f, 0.28f}, \
+}
 #define GAME_PIX         3       // screen pixels per pixel-art (mascot grid) cell
 #define GAME_MAX_OBST    4
 #define GAME_NVS_NS      "dyno"  // flash namespace for the highscore
+
+// ---------------- jump king (climb to the top floor, launched from the menu) ----------------
+// Claudie stands on a platform while an aim marker sweeps left <-> right; a
+// press launches her along it at a fixed strength. Ledges are one-way (she
+// jumps up through them and lands on top), walls and the screen edges are
+// solid, and a missed jump just falls to whatever is below. The level itself
+// is hand-built in jump_level.h.
+#define JK_FLOORS        25      // floors above the ground; reaching the top one wins
+#define JK_FLOOR_DY      38.0f   // px between floors
+#define JK_GRAVITY       620.0f  // px/s^2
+// Fixed jump strength: apex is v^2/2g ~ 63 px, so the next floor (38 px up) is
+// in reach for aims between ~55° and ~125°, and two floors never are.
+#define JK_JUMP_V        280.0f  // px/s
+#define JK_MAX_FALL      420.0f  // px/s terminal velocity
+#define JK_WALL_BOUNCE   0.7f    // share of sideways speed kept off a wall
+#define JK_AIM_MIN_DEG   30.0f   // aim sweep, degrees above the horizontal (right)
+#define JK_AIM_MAX_DEG   150.0f  // ... and its far end (left)
+#define JK_AIM_PERIOD_MS 2800    // one full left -> right -> left sweep
+#define JK_PIX           2       // small Claudie: 2 screen px per art cell
+#define JK_NVS_NS        "jking" // flash namespace for the best time
+// High contrast on purpose: a dim castle backdrop, bright white ledges and
+// pale stone walls, so everything she can touch pops off the background.
+#define COL_JK_BRICK     0x38E1  // #3A1C0C backdrop brick
+#define COL_JK_BRICK2    0x4922  // #4A2612 odd backdrop brick, breaks up the tiling
+#define COL_JK_MORTAR    0x1860  // #1C0C04 backdrop mortar, windows, HUD backing
+#define COL_JK_PLAT      0xFFFF  // ledge brick
+#define COL_JK_PLAT_M    0xAD55  // #A8A8A8 ledge mortar
+#define COL_JK_WALL      0xD678  // #D0CCC4 wall stone
+#define COL_JK_WALL_M    0x7BCE  // #7C7870 wall mortar
+#define COL_JK_MISS      0xFCF8  // #FF9EC4 — the Claudie waiting at the top
+#define COL_JK_HEART     COL_BAD

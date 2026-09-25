@@ -14,6 +14,12 @@ struct Stats {
   ModelShare monthModels[3];
 };
 
+// Watch face (eyes + optional stats), the icon menu, or one of the minigames.
+enum class Screen : uint8_t { Face, Menu, Game, Jump };
+
+// Menu entries, left to right on screen.
+enum MenuItem : uint8_t { MENU_GAME, MENU_JUMP, MENU_POWER, MENU_BACK, MENU_COUNT };
+
 struct AppState {
   volatile bool connected = false;
   volatile bool hasData = false;
@@ -26,7 +32,9 @@ struct AppState {
   uint8_t battPct = 0;                    // 0-100 %, mapped over 3.3-4.1 V
   bool showData = true;                   // false = eyes-only view (button click)
   uint32_t btnHeldMs = 0;                 // >0 while the button is held down
-  bool gameActive = false;                // hidden dyno minigame owns the screen
+  Screen screen = Screen::Face;           // what owns the display right now
+  uint8_t menuSel = 0;                    // highlighted menu item (MenuItem)
+  uint32_t menuInputAt = 0;               // last button activity in the menu
   Stats stats;
 };
 

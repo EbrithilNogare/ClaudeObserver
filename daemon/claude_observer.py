@@ -161,10 +161,14 @@ def _record_day(used: float) -> float:
     """Store today's monthly total and return today's spend.
 
     The endpoint only exposes a monthly running total, so per-day spend is a
-    delta: today = used - the highest total recorded on any earlier day. Each
-    day keeps [first_seen, last_seen] of the counter; `first_seen` is the
-    fallback baseline when there is no earlier day yet (a fresh install, or the
-    1st of the month), and a drop below it means the monthly counter reset.
+    delta: today = used - the first total seen today. Each day keeps
+    [first_seen, last_seen] of the counter; a drop below `first_seen` means the
+    monthly counter reset.
+
+    The baseline is deliberately today's first reading, not yesterday's last:
+    anything that lands between the two (spend after the daemon last polled,
+    other machines, late-booked usage overnight) would otherwise show up as
+    phantom spend first thing in the morning.
     """
     today = date.today().isoformat()
     try:
@@ -182,14 +186,11 @@ def _record_day(used: float) -> float:
     cutoff = date.today().replace(day=1).isoformat()
     hist = {k: v for k, v in hist.items() if k >= cutoff}
 
-    earlier = [v[1] for k, v in hist.items() if k < today]
-    base = max(earlier) if earlier else first
-
     try:
         HISTORY.write_text(json.dumps(hist, indent=2, sort_keys=True))
     except OSError as exc:
         log.warning("cannot persist daily history: %s", exc)
-    return max(0.0, used - base)
+    return max(0.0, used - first)
 
 
 def collect(cfg: dict, attempts: int = 1) -> dict | None:

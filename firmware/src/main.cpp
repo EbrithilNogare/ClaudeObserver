@@ -12,6 +12,7 @@
 #include "ui.h"
 #include "button.h"
 #include "game.h"
+#include "jump.h"
 #include <esp_sleep.h>
 #include <driver/gpio.h>
 
@@ -19,6 +20,7 @@ AppState app;
 static UI ui;
 static Button button;
 static Game game;
+static JumpGame jump;
 
 static String rxBuffer;
 
@@ -130,7 +132,7 @@ static void updateSensors(uint32_t now) {
 
 // ---------------------------------------------------------------- button
 
-// Suspend on a button hold: park the display, drop the radio, then light sleep
+// Suspend from the menu's power item: park the display, drop the radio, then light sleep
 // with the button armed as the wake source.
 //
 // Light sleep rather than deep sleep on purpose — the C6 can only wake from
@@ -143,7 +145,7 @@ static void updateSensors(uint32_t now) {
 // price of re-fetching the stats from the daemon. setup() fades in with the wake
 // animation on every boot, so the restart looks like a wake-up either way.
 static void enterLightSleep() {
-  Serial.println("[btn] hold -> light sleep");
+  Serial.println("[menu] power -> light sleep");
   app.btnHeldMs = 0;      // drop the hold bar for the animation
   ui.playSleepAnim();     // 5 s eyes-closing fade, ends with the panel dark
   // The BLE controller holds a power-management lock that would keep the chip
@@ -184,44 +186,91 @@ static void enterLightSleep() {
   esp_restart();  // never returns; setup() plays the wake animation
 }
 
-// ---------------------------------------------------------------- minigame
+// ---------------------------------------------------------------- screens
 
-// The hidden runner takes over the screen; the button switches to the game
-// thresholds (3 s down quits, no secret window) and the BLE stack keeps running
-// untouched in the background, so the stats are fresh again on the way out.
-static void enterGame(uint32_t now) {
-  Serial.println("[game] secret hold -> dyno minigame");
-  app.gameActive = true;
-  game.reset(now);
-  button.setThresholds(GAME_EXIT_HOLD_MS, GAME_EXIT_HOLD_MS);
+// Every screen has its own hold threshold: 3 s opens the menu from the watch
+// face, 2 s picks a menu item, 3 s quits the game. Switching mid-press is safe —
+// the press that triggered the switch is spent until release (Button::holdSpent).
+static void showScreen(Screen s, uint32_t now) {
+  app.screen = s;
+  switch (s) {
+    case Screen::Face: button.setHoldMs(BTN_MENU_HOLD_MS); break;
+    case Screen::Menu:
+      button.setHoldMs(MENU_SELECT_HOLD_MS);
+      app.menuSel = MENU_GAME;
+      app.menuInputAt = now;
+      break;
+    case Screen::Game:
+      button.setHoldMs(GAME_EXIT_HOLD_MS);
+      game.reset(now);
+      break;
+    case Screen::Jump:
+      button.setHoldMs(GAME_EXIT_HOLD_MS);
+      jump.reset(now);
+      break;
+  }
 }
 
-static void exitGame() {
-  Serial.printf("[game] hold -> exit (highscore %u)\n", game.highscore());
-  app.gameActive = false;
-  button.setThresholds(BTN_HOLD_MS, BTN_SECRET_MS);
-  button.waitForRelease();  // the exit hold must not also click the watch face
-  app.btnHeldMs = 0;
+// A minigame takes over the screen; the BLE stack keeps running untouched in
+// the background, so the stats are fresh again on the way out.
+static void menuPick(uint32_t now) {
+  switch (app.menuSel) {
+    case MENU_GAME:
+      Serial.println("[menu] -> dyno minigame");
+      showScreen(Screen::Game, now);
+      break;
+    case MENU_JUMP:
+      Serial.println("[menu] -> jump climber");
+      showScreen(Screen::Jump, now);
+      break;
+    case MENU_POWER:
+      enterLightSleep();  // never returns
+      break;
+    default:
+      Serial.println("[menu] -> back to watch face");
+      showScreen(Screen::Face, now);
+      break;
+  }
 }
 
 static void updateButton(uint32_t now) {
   Button::Event ev = button.update(now);
-  app.btnHeldMs = button.heldMs(now);
-  if (app.gameActive) {
-    // Jump on the down edge, not the release — waiting for the release costs a
-    // whole reaction time and the jump feels late. The release itself (CLICK)
-    // is therefore ignored, or every tap would jump twice.
-    if (ev == Button::PRESS) game.press(now);
-    else if (ev == Button::HOLD) exitGame();
-    return;
-  }
-  if (ev == Button::CLICK) {
-    app.showData = !app.showData;
-    Serial.printf("[btn] click -> %s\n", app.showData ? "eyes + data" : "eyes only");
-  } else if (ev == Button::SECRET) {
-    enterGame(now);
-  } else if (ev == Button::HOLD) {
-    enterLightSleep();
+  // A spent press shows no progress bar — the hold already did its job.
+  app.btnHeldMs = button.holdSpent() ? 0 : button.heldMs(now);
+  switch (app.screen) {
+    case Screen::Game:
+      // Jump on the down edge, not the release — waiting for the release costs
+      // a whole reaction time and the jump feels late. The release itself
+      // (CLICK) is therefore ignored, or every tap would jump twice.
+      if (ev == Button::PRESS) game.press(now);
+      else if (ev == Button::HOLD) {
+        Serial.printf("[game] hold -> exit (highscore %u)\n", game.highscore());
+        showScreen(Screen::Face, now);
+      }
+      break;
+    case Screen::Jump:
+      // Same idea: the jump fires on the down edge.
+      if (ev == Button::PRESS) jump.press(now);
+      else if (ev == Button::HOLD) {
+        Serial.printf("[jump] hold -> exit (best %lu ms)\n", (unsigned long)jump.bestMs());
+        showScreen(Screen::Face, now);
+      }
+      break;
+    case Screen::Menu:
+      if (ev != Button::NONE || button.isDown()) app.menuInputAt = now;
+      if (ev == Button::CLICK) app.menuSel = (app.menuSel + 1) % MENU_COUNT;
+      else if (ev == Button::HOLD) menuPick(now);
+      else if (now - app.menuInputAt > MENU_IDLE_MS) showScreen(Screen::Face, now);
+      break;
+    case Screen::Face:
+      if (ev == Button::CLICK) {
+        app.showData = !app.showData;
+        Serial.printf("[btn] click -> %s\n", app.showData ? "eyes + data" : "eyes only");
+      } else if (ev == Button::HOLD) {
+        Serial.println("[btn] hold -> menu");
+        showScreen(Screen::Menu, now);
+      }
+      break;
   }
 }
 
@@ -245,7 +294,8 @@ void setup() {
   // Every boot fades in the same way, whether it is a cold start or the restart
   // that ends a light sleep.
   ui.begin(/*dark=*/true);   // start dark so the wake animation can fade in
-  game.begin();              // load the minigame highscore from flash
+  game.begin();              // load the minigame highscores from flash
+  jump.begin();
   ui.playWakeAnim();         // 2 s eyes-opening fade
   button.waitForRelease();   // a wake press must not also count as a click
   bleBegin();
@@ -255,15 +305,27 @@ void loop() {
   uint32_t now = millis();
   updateButton(now);
   updateSensors(now);
-  if (app.gameActive) {
-    static uint32_t lastGame = 0;
-    if (!lastGame) lastGame = now;
-    game.update(now, now - lastGame);
-    lastGame = now;
-    game.draw(ui.frame(), now);
-    ui.push();
-  } else {
-    ui.render(now);
+  switch (app.screen) {
+    case Screen::Game: {
+      static uint32_t lastGame = 0;
+      if (!lastGame) lastGame = now;
+      game.update(now, now - lastGame);
+      lastGame = now;
+      game.draw(ui.frame(), now);
+      ui.push();
+      break;
+    }
+    case Screen::Jump: {
+      static uint32_t lastJump = 0;
+      if (!lastJump) lastJump = now;
+      jump.update(now, now - lastJump);
+      lastJump = now;
+      jump.draw(ui.frame(), now);
+      ui.push();
+      break;
+    }
+    case Screen::Menu: ui.renderMenu(now); break;
+    case Screen::Face: ui.render(now); break;
   }
   static uint32_t last = 0;
   if (now - last < FRAME_MS) delay(FRAME_MS - (now - last));

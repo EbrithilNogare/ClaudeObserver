@@ -1,6 +1,7 @@
 #pragma once
 #include <driver/gpio.h>
 
+#include "game.h"  // art:: — the menu's game icon is Claudie herself
 #include "lgfx_conf.h"
 #include "state.h"
 
@@ -139,7 +140,42 @@ public:
       drawSleepExtras(now);
     }
     if (app.showData) drawCorner();
-    drawHoldProgress();
+    drawHoldProgress(BTN_MENU_HOLD_MS);
+    _frame.pushSprite(0, 0);
+  }
+
+  // ---------------- menu ----------------
+  // Face-orange background with one icon tile per MenuItem in a row. The
+  // highlighted tile is filled near-black with the icon knocked out in orange;
+  // the others are outlines. Click moves the highlight, the hold bar along the
+  // bottom shows how close a hold is to picking it.
+  void renderMenu(uint32_t now) {
+    _frame.fillSprite(COL_BG);
+    const int n = MENU_COUNT;
+    const int gap = (_frame.width() - n * MENU_TILE) / (n + 1);
+    const int cy = _frame.height() / 2;
+    for (int i = 0; i < n; i++) {
+      bool sel = i == app.menuSel;
+      int cx = gap + i * (MENU_TILE + gap) + MENU_TILE / 2;
+      // the highlighted tile floats a little, so it reads as "live"
+      int y = cy + (sel ? (int)roundf(2 * sinf(now / 350.0f)) : 0);
+      int x0 = cx - MENU_TILE / 2, y0 = y - MENU_TILE / 2;
+      uint16_t ink = sel ? COL_BG : COL_EYE;
+      if (sel) {
+        _frame.fillSmoothRoundRect(x0, y0, MENU_TILE, MENU_TILE, 16, COL_EYE);
+      } else {
+        for (int t = 0; t < 3; t++)
+          _frame.drawRoundRect(x0 + t, y0 + t, MENU_TILE - 2 * t, MENU_TILE - 2 * t,
+                               16 - t, COL_EYE);
+      }
+      switch (i) {
+        case MENU_GAME: drawIconGame(cx, y, ink, sel ? COL_EYE : COL_BG); break;
+        case MENU_JUMP: drawIconJump(cx, y, ink, sel ? COL_EYE : COL_BG); break;
+        case MENU_POWER: drawIconPower(cx, y, ink); break;
+        case MENU_BACK: drawIconBack(cx, y, ink); break;
+      }
+    }
+    drawHoldProgress(MENU_SELECT_HOLD_MS);
     _frame.pushSprite(0, 0);
   }
 
@@ -159,12 +195,66 @@ private:
   }
 
   // While the button is held, a bar fills across the bottom edge; when it
-  // reaches the full width the device goes to sleep.
-  void drawHoldProgress() {
+  // reaches the full width the hold fires (open the menu / pick the item).
+  void drawHoldProgress(uint32_t holdMs) {
     if (app.btnHeldMs < 250) return;  // ignore ordinary clicks
-    float r = min(1.0f, (float)app.btnHeldMs / BTN_HOLD_MS);
+    float r = min(1.0f, (float)app.btnHeldMs / holdMs);
     int h = 3, y = _frame.height() - h;
     _frame.fillRect(0, y, (int)(_frame.width() * r), h, COL_EYE);
+  }
+
+  // ---------------- menu icons ----------------
+  // Each icon is drawn centred on (cx, cy) and fits a ~48 px square.
+  static constexpr int MENU_TILE = 64;
+
+  // Dyno game: Claudie, straight off the minigame's pixel art (4 px cells),
+  // with her two square eyes punched through in the tile colour.
+  void drawIconGame(int cx, int cy, uint16_t ink, uint16_t eye) {
+    const int P = 4, w = 12 * P, h = 8 * P;
+    int x = cx - w / 2, y = cy - h / 2;
+    art::blit(_frame, x, y, art::CLAUDIE_BODY, 6, ink, P);
+    art::blit(_frame, x, y + 6 * P, art::CLAUDIE_LEGS_A, 2, ink, P);
+    _frame.fillRect(x + 3 * P, y + P, P, P, eye);
+    _frame.fillRect(x + 8 * P, y + P, P, P, eye);
+  }
+
+  // Jump climber: small Claudie on a low ledge, aim dots pointing up to a
+  // higher one.
+  void drawIconJump(int cx, int cy, uint16_t ink, uint16_t eye) {
+    const int P = 2;
+    _frame.fillRect(cx - 24, cy + 18, 28, 4, ink);  // lower ledge
+    _frame.fillRect(cx + 6, cy - 20, 18, 4, ink);   // upper ledge
+    int x = cx - 22, y = cy + 18 - 8 * P;
+    art::blit(_frame, x, y, art::CLAUDIE_BODY, 6, ink, P);
+    art::blit(_frame, x, y + 6 * P, art::CLAUDIE_LEGS_A, 2, ink, P);
+    _frame.fillRect(x + 3 * P, y + P, P, P, eye);
+    _frame.fillRect(x + 8 * P, y + P, P, P, eye);
+    _frame.fillRect(cx - 6, cy - 3, 3, 3, ink);
+    _frame.fillRect(cx - 1, cy - 9, 3, 3, ink);
+    _frame.fillRect(cx + 4, cy - 16, 4, 4, ink);
+  }
+
+  // Power off: the standard power symbol — a ring open at the top with a bar
+  // dropping into the gap.
+  void drawIconPower(int cx, int cy, uint16_t ink) {
+    const int r1 = 22, r0 = 15;
+    // arc angles are degrees clockwise from 3 o'clock; top is 270
+    _frame.fillArc(cx, cy + 2, r0, r1, 310, 360, ink);
+    _frame.fillArc(cx, cy + 2, r0, r1, 0, 230, ink);
+    _frame.fillSmoothRoundRect(cx - 4, cy - r1 - 2, 8, r1 + 2, 4, ink);
+  }
+
+  // Back: a U-turn arrow — arrowhead pointing left along the top, curving
+  // round the right-hand side and back along the bottom.
+  void drawIconBack(int cx, int cy, uint16_t ink) {
+    const int ax = cx + 6, ay = cy + 4;  // centre of the bend
+    const int r0 = 11, r1 = 18, t = r1 - r0;
+    _frame.fillArc(ax, ay, r0, r1, 270, 360, ink);
+    _frame.fillArc(ax, ay, r0, r1, 0, 90, ink);
+    _frame.fillRect(cx - 10, ay - r1, ax - (cx - 10) + 1, t, ink);  // top run
+    _frame.fillRect(cx - 18, ay + r0, ax - (cx - 18) + 1, t, ink);  // bottom run
+    int my = ay - r1 + t / 2;  // arrowhead sits on the top run's centre line
+    _frame.fillTriangle(cx - 24, my, cx - 10, my - 12, cx - 10, my + 12, ink);
   }
 
   static float clamp01(float v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
